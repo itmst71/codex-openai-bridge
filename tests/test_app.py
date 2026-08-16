@@ -1,0 +1,351 @@
+from __future__ import annotations
+
+import asyncio
+import io
+import re
+from collections.abc import AsyncIterator
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+from aiohttp.test_utils import TestClient, TestServer
+
+from codex_openai_bridge.app import create_app
+from codex_openai_bridge.auth import Credential, CredentialUnavailable
+from codex_openai_bridge.config import Settings
+
+TOKEN = "a" * 43
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+
+class NeverCredentialManager:
+    async def get_credentials(self, *, force_refresh: bool = False) -> Credential:
+        del force_refresh
+        raise AssertionError("credential resolver must not be called")
+
+
+class UnexpectedFailingCredentialManager:
+    async def get_credentials(self, *, force_refresh: bool = False) -> Credential:
+        del force_refresh
+        raise RuntimeError("SENSITIVE_UNEXPECTED_DETAIL")
+
+
+class FailingCredentialManager:
+    async def get_credentials(self, *, force_refresh: bool = False) -> Credential:
+        del force_refresh
+        raise CredentialUnavailable("SENSITIVE_RESOLVER_DETAIL")
+
+
+class StaticCredentialManager:
+    def __init__(self, credential: Credential) -> None:
+        self.credential = credential
+        self.calls: list[bool] = []
+
+    async def get_credentials(self, *, force_refresh: bool = False) -> Credential:
+        self.calls.append(force_refresh)
+        return self.credential
+
+
+def _credential(
+    *,
+    access_token: str = "upstream-token",
+    base_url: str = "https://chatgpt.com/backend-api/codex",
+    account_id: str | None = "account-1",
+    expires_at: int = 4_102_444_800,
+) -> Credential:
+    return Credential(
+        access_token=access_token,
+        base_url=base_url,
+        account_id=account_id,
+        expires_at=expires_at,
+    )
+
+
+def _settings(tmp_path: Path) -> Settings:
+    token_file = tmp_path / "client-token"
+    token_file.write_text(TOKEN + "\n", encoding="ascii")
+    token_file.chmod(0o600)
+    return replace(Settings.from_env(), client_token_file=token_file)
+
+
+@pytest.mark.asyncio
+async def test_expect_100_authorized_request_preserves_continue_flow(tmp_path: Path) -> None:
+    server = TestServer(create_app(_settings(tmp_path), NeverCredentialManager()))
+
+    async with server:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        try:
+            writer.write(
+                (
+                    "POST /v1/chat/completions HTTP/1.1\r\n"
+                    f"Host: {server.host}:{server.port}\r\n"
+                    "Content-Length: 2\r\n"
+                    "Expect: 100-continue\r\n"
+                    f"Authorization: Bearer {TOKEN}\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                ).encode("ascii")
+            )
+            await writer.drain()
+            continue_head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=1.0)
+            writer.write(b"{}")
+            await writer.drain()
+            final_head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=1.0)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    assert continue_head == b"HTTP/1.1 100 Continue\r\n\r\n"
+    assert final_head.startswith(b"HTTP/1.1 501 ")
+    assert re.search(rb"\r\nX-Request-ID: [0-9a-f]{32}\r\n", final_head, re.IGNORECASE)
+
+
+@pytest.mark.asyncio
+async def test_expect_100_unauthorized_first_wire_response_is_401(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    server = TestServer(create_app(settings, NeverCredentialManager()))
+
+    async with server:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        try:
+            writer.write(
+                (
+                    "POST /v1/chat/completions HTTP/1.1\r\n"
+                    f"Host: {server.host}:{server.port}\r\n"
+                    f"Content-Length: {settings.max_request_body_bytes + 1}\r\n"
+                    "Expect: 100-continue\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                ).encode("ascii")
+            )
+            await writer.drain()
+            first_response_head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=1.0)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    assert first_response_head.startswith(b"HTTP/1.1 401 ")
+    assert b"100 Continue" not in first_response_head
+    assert re.search(rb"\r\nX-Request-ID: [0-9a-f]{32}\r\n", first_response_head, re.IGNORECASE)
+
+
+@pytest.mark.asyncio
+async def test_expect_100_unauthorized_request_never_starts_body_upload(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    app = create_app(settings, NeverCredentialManager())
+    body_starts = 0
+
+    async def body() -> AsyncIterator[bytes]:
+        nonlocal body_starts
+        body_starts += 1
+        yield b"x" * (settings.max_request_body_bytes + 1)
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            data=body(),
+            expect100=True,
+        )
+
+    assert response.status == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert body_starts == 0
+
+
+@pytest.mark.asyncio
+async def test_duplicate_authorization_headers_are_rejected(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager())
+    headers = [
+        ("Authorization", f"Bearer {TOKEN}"),
+        ("Authorization", "Bearer " + "b" * 43),
+    ]
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/v1/chat/completions", data=b"{}", headers=headers)
+
+    assert response.status == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authorization",
+    [None, "", "Basic abc", "Bearer wrong", "bearer " + TOKEN, "Bearer " + "b" * 43],
+)
+async def test_missing_malformed_or_wrong_bearer_returns_openai_401(
+    tmp_path: Path,
+    authorization: str | None,
+) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager())
+    headers = {} if authorization is None else {"Authorization": authorization}
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/v1/chat/completions", data=b"{}", headers=headers)
+        body = await response.json()
+
+    assert response.status == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert body == {
+        "error": {
+            "message": "Invalid authentication credentials",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "invalid_api_key",
+        }
+    }
+    assert TOKEN not in repr(body)
+
+
+@pytest.mark.asyncio
+async def test_valid_bearer_reaches_protected_handler(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager())
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/v1/chat/completions", data=b"{}", headers=AUTH)
+
+    assert response.status == 501
+
+
+@pytest.mark.asyncio
+async def test_request_id_is_server_generated_fixed_size(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager())
+
+    async with TestClient(TestServer(app)) as client:
+        first = await client.get("/healthz", headers={"X-Request-ID": "client-authority"})
+        second = await client.get("/healthz", headers={"X-Request-ID": "client-authority"})
+
+    first_id = first.headers["X-Request-ID"]
+    second_id = second.headers["X-Request-ID"]
+    assert re.fullmatch(r"[0-9a-f]{32}", first_id)
+    assert re.fullmatch(r"[0-9a-f]{32}", second_id)
+    assert first_id != second_id
+    assert first_id != "client-authority"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://chatgpt.com/backend-api/codex",
+        "https://evil.example/backend-api/codex",
+        "https://chatgpt.com:444/backend-api/codex",
+        "https://user@chatgpt.com/backend-api/codex",
+        "https://chatgpt.com/backend-api/codex/",
+        "https://chatgpt.com/backend-api/codex/responses",
+        "https://chatgpt.com/backend-api/codex?redirect=evil",
+        "https://chatgpt.com/backend-api/codex#fragment",
+    ],
+)
+async def test_readyz_rejects_noncanonical_credential_url(
+    tmp_path: Path,
+    base_url: str,
+) -> None:
+    app = create_app(_settings(tmp_path), StaticCredentialManager(_credential(base_url=base_url)))
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/readyz")
+
+    assert response.status == 503
+
+
+@pytest.mark.asyncio
+async def test_readyz_rejects_credential_inside_expiry_skew(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), StaticCredentialManager(_credential(expires_at=1)))
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/readyz")
+
+    assert response.status == 503
+
+
+@pytest.mark.asyncio
+async def test_readyz_accepts_fresh_credential_without_account_id(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), StaticCredentialManager(_credential(account_id=None)))
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/readyz")
+
+    assert response.status == 200
+
+
+@pytest.mark.asyncio
+async def test_readyz_rejects_empty_upstream_token(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), StaticCredentialManager(_credential(access_token="")))
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/readyz")
+
+    assert response.status == 503
+
+
+@pytest.mark.asyncio
+async def test_readyz_contains_unexpected_provider_exception_without_log_leak(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = create_app(_settings(tmp_path), UnexpectedFailingCredentialManager())
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/readyz")
+        body = await response.json()
+
+    assert response.status == 503
+    assert body == {"status": "unavailable"}
+    assert "SENSITIVE_UNEXPECTED_DETAIL" not in repr(body)
+    assert "SENSITIVE_UNEXPECTED_DETAIL" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_readyz_returns_sanitized_503_when_credentials_are_unavailable(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), FailingCredentialManager())
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/readyz")
+        body = await response.json()
+
+    assert response.status == 503
+    assert body == {"status": "unavailable"}
+    assert "SENSITIVE_RESOLVER_DETAIL" not in repr(body)
+
+
+@pytest.mark.asyncio
+async def test_readyz_accepts_fresh_credential_with_canonical_url(tmp_path: Path) -> None:
+    manager = StaticCredentialManager(_credential())
+    app = create_app(_settings(tmp_path), manager)
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/readyz")
+        body = await response.json()
+
+    assert response.status == 200
+    assert body == {"status": "ready"}
+    assert manager.calls == [False]
+
+
+@pytest.mark.asyncio
+async def test_healthz_is_unauthed_liveness_only(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager())
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/healthz")
+        body = await response.json()
+
+    assert response.status == 200
+    assert body == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_missing_bearer_is_rejected_before_oversized_body_read(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    app = create_app(settings, NeverCredentialManager())
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            data=io.BytesIO(b"x" * (settings.max_request_body_bytes + 1)),
+        )
+
+    assert response.status == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
