@@ -13,6 +13,12 @@ from aiohttp.http import HttpVersion11
 from codex_openai_bridge.auth import Credential
 from codex_openai_bridge.config import Settings
 from codex_openai_bridge.errors import openai_error_response
+from codex_openai_bridge.json_boundary import (
+    JsonBodyTooLarge,
+    JsonBoundaryError,
+    read_json_request,
+    validate_json_request_headers,
+)
 from codex_openai_bridge.security import bearer_is_authorized, load_bridge_token
 
 
@@ -24,6 +30,7 @@ class CredentialProvider(Protocol):
 
 _TOKEN_KEY = web.AppKey("bridge_token", str)
 _CREDENTIAL_PROVIDER_KEY = web.AppKey("credential_provider", CredentialProvider)
+_SETTINGS_KEY = web.AppKey("settings", Settings)
 _CANONICAL_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _READINESS_EXPIRY_SKEW_SECONDS = 60
 _REQUEST_ID_BYTES = 16
@@ -53,6 +60,22 @@ def _request_is_authorized(request: web.Request) -> bool:
     return len(values) == 1 and bearer_is_authorized(values[0], request.app[_TOKEN_KEY])
 
 
+def _json_boundary_response(error: JsonBoundaryError) -> web.Response:
+    if isinstance(error, JsonBodyTooLarge):
+        return openai_error_response(
+            status=413,
+            message="Request body is too large",
+            error_type="invalid_request_error",
+            code="request_too_large",
+        )
+    return openai_error_response(
+        status=400,
+        message="Request JSON is invalid",
+        error_type="invalid_request_error",
+        code="invalid_json",
+    )
+
+
 async def _protected_expect_handler(request: web.Request) -> web.StreamResponse | None:
     if not _request_is_authorized(request):
         response = openai_error_response(
@@ -62,6 +85,15 @@ async def _protected_expect_handler(request: web.Request) -> web.StreamResponse 
             code="invalid_api_key",
             headers={"WWW-Authenticate": "Bearer"},
         )
+        response.headers[_REQUEST_ID_HEADER] = _assign_request_id(request)
+        return response
+    try:
+        validate_json_request_headers(
+            request,
+            max_body_bytes=request.app[_SETTINGS_KEY].max_request_body_bytes,
+        )
+    except JsonBoundaryError as error:
+        response = _json_boundary_response(error)
         response.headers[_REQUEST_ID_HEADER] = _assign_request_id(request)
         return response
     expect_values = request.headers.getall(hdrs.EXPECT, [])
@@ -117,7 +149,18 @@ async def _readyz(request: web.Request) -> web.Response:
     return web.json_response({"status": "unavailable"}, status=503)
 
 
-async def _not_implemented(_request: web.Request) -> web.Response:
+async def _bounded_not_implemented(request: web.Request) -> web.Response:
+    settings = request.app[_SETTINGS_KEY]
+    try:
+        await read_json_request(
+            request,
+            max_body_bytes=settings.max_request_body_bytes,
+            max_depth=settings.max_json_depth,
+            max_nodes=settings.max_json_nodes,
+            max_string_bytes=settings.max_string_bytes,
+        )
+    except JsonBoundaryError as error:
+        return _json_boundary_response(error)
     return openai_error_response(
         status=501,
         message="Endpoint is not implemented",
@@ -134,11 +177,12 @@ def create_app(settings: Settings, credential_provider: CredentialProvider) -> w
     )
     app[_TOKEN_KEY] = load_bridge_token(settings.client_token_file)
     app[_CREDENTIAL_PROVIDER_KEY] = credential_provider
+    app[_SETTINGS_KEY] = settings
     app.router.add_get("/healthz", _healthz)
     app.router.add_get("/readyz", _readyz)
     app.router.add_post(
         "/v1/chat/completions",
-        _not_implemented,
+        _bounded_not_implemented,
         expect_handler=_protected_expect_handler,
     )
     return app

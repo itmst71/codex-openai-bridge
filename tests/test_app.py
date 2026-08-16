@@ -69,6 +69,65 @@ def _settings(tmp_path: Path) -> Settings:
 
 
 @pytest.mark.asyncio
+async def test_expect_100_wrong_content_type_is_rejected_before_continue(tmp_path: Path) -> None:
+    server = TestServer(create_app(_settings(tmp_path), NeverCredentialManager()))
+
+    async with server:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        try:
+            writer.write(
+                (
+                    "POST /v1/chat/completions HTTP/1.1\r\n"
+                    f"Host: {server.host}:{server.port}\r\n"
+                    "Content-Length: 2\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Expect: 100-continue\r\n"
+                    f"Authorization: Bearer {TOKEN}\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                ).encode("ascii")
+            )
+            await writer.drain()
+            first_response_head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=1.0)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    assert first_response_head.startswith(b"HTTP/1.1 400 ")
+    assert b"100 Continue" not in first_response_head
+
+
+@pytest.mark.asyncio
+async def test_expect_100_authorized_oversize_is_rejected_before_continue(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), max_request_body_bytes=1024)
+    server = TestServer(create_app(settings, NeverCredentialManager()))
+
+    async with server:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        try:
+            writer.write(
+                (
+                    "POST /v1/chat/completions HTTP/1.1\r\n"
+                    f"Host: {server.host}:{server.port}\r\n"
+                    f"Content-Length: {settings.max_request_body_bytes + 1}\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Expect: 100-continue\r\n"
+                    f"Authorization: Bearer {TOKEN}\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                ).encode("ascii")
+            )
+            await writer.drain()
+            first_response_head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=1.0)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    assert first_response_head.startswith(b"HTTP/1.1 413 ")
+    assert b"100 Continue" not in first_response_head
+
+
+@pytest.mark.asyncio
 async def test_expect_100_authorized_request_preserves_continue_flow(tmp_path: Path) -> None:
     server = TestServer(create_app(_settings(tmp_path), NeverCredentialManager()))
 
@@ -80,6 +139,7 @@ async def test_expect_100_authorized_request_preserves_continue_flow(tmp_path: P
                     "POST /v1/chat/completions HTTP/1.1\r\n"
                     f"Host: {server.host}:{server.port}\r\n"
                     "Content-Length: 2\r\n"
+                    "Content-Type: application/json\r\n"
                     "Expect: 100-continue\r\n"
                     f"Authorization: Bearer {TOKEN}\r\n"
                     "Connection: close\r\n"
@@ -197,11 +257,224 @@ async def test_missing_malformed_or_wrong_bearer_returns_openai_401(
 
 
 @pytest.mark.asyncio
+async def test_declared_oversize_is_rejected_without_waiting_for_body(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), max_request_body_bytes=1024)
+    server = TestServer(create_app(settings, NeverCredentialManager()))
+
+    async with server:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        try:
+            writer.write(
+                (
+                    "POST /v1/chat/completions HTTP/1.1\r\n"
+                    f"Host: {server.host}:{server.port}\r\n"
+                    f"Content-Length: {settings.max_request_body_bytes + 1}\r\n"
+                    "Content-Type: application/json\r\n"
+                    f"Authorization: Bearer {TOKEN}\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                ).encode("ascii")
+            )
+            await writer.drain()
+            response_head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=1.0)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    assert response_head.startswith(b"HTTP/1.1 413 ")
+
+
+@pytest.mark.asyncio
+async def test_truncated_content_length_never_reaches_application_handler(tmp_path: Path) -> None:
+    server = TestServer(create_app(_settings(tmp_path), NeverCredentialManager()))
+
+    async with server:
+        reader, writer = await asyncio.open_connection(server.host, server.port)
+        try:
+            writer.write(
+                (
+                    "POST /v1/chat/completions HTTP/1.1\r\n"
+                    f"Host: {server.host}:{server.port}\r\n"
+                    "Content-Length: 10\r\n"
+                    "Content-Type: application/json\r\n"
+                    f"Authorization: Bearer {TOKEN}\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    "{}"
+                ).encode("ascii")
+            )
+            await writer.drain()
+            writer.write_eof()
+            try:
+                response_head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=1.0)
+            except asyncio.IncompleteReadError as exc:
+                response_head = exc.partial
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    assert not response_head.startswith(b"HTTP/1.1 501 ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content_type",
+    ["application/json", "Application/JSON; Charset=UTF-8", 'application/json; charset="utf-8"'],
+)
+async def test_supported_json_content_type_is_accepted(
+    tmp_path: Path,
+    content_type: str,
+) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager())
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            data=b"{}",
+            headers={**AUTH, "Content-Type": content_type},
+        )
+
+    assert response.status == 501
+
+
+@pytest.mark.asyncio
+async def test_duplicate_content_type_headers_are_rejected(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager())
+    headers = [
+        ("Authorization", f"Bearer {TOKEN}"),
+        ("Content-Type", "text/plain"),
+        ("Content-Type", "application/json"),
+    ]
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/v1/chat/completions", data=b"{}", headers=headers)
+
+    assert response.status == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "text/plain",
+        "application/problem+json",
+        "application/json; charset=iso-8859-1",
+        "application/json; profile=example",
+    ],
+)
+async def test_wrong_json_content_type_is_rejected(
+    tmp_path: Path,
+    content_type: str,
+) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager())
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            data=b"{}",
+            headers={**AUTH, "Content-Type": content_type},
+        )
+
+    assert response.status == 400
+
+
+@pytest.mark.asyncio
+async def test_authenticated_body_exact_limit_is_accepted(tmp_path: Path) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        max_request_body_bytes=1024,
+        max_string_bytes=1024,
+    )
+    payload = b'{"x":"' + b"a" * (settings.max_request_body_bytes - 8) + b'"}'
+    assert len(payload) == settings.max_request_body_bytes
+    app = create_app(settings, NeverCredentialManager())
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            data=payload,
+            headers={**AUTH, "Content-Type": "application/json"},
+        )
+
+    assert response.status == 501
+
+
+@pytest.mark.asyncio
+async def test_authenticated_content_length_one_over_is_413(tmp_path: Path) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        max_request_body_bytes=1024,
+        max_string_bytes=1024,
+    )
+    payload = b'{"x":"' + b"a" * (settings.max_request_body_bytes - 7) + b'"}'
+    assert len(payload) == settings.max_request_body_bytes + 1
+    app = create_app(settings, NeverCredentialManager())
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            data=payload,
+            headers={**AUTH, "Content-Type": "application/json"},
+        )
+        body = await response.json()
+
+    assert response.status == 413
+    assert body["error"]["code"] == "request_too_large"
+    assert "aaaa" not in repr(body)
+
+
+@pytest.mark.asyncio
+async def test_authenticated_chunked_body_one_over_is_413(tmp_path: Path) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        max_request_body_bytes=1024,
+        max_string_bytes=1024,
+    )
+    app = create_app(settings, NeverCredentialManager())
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b'{"x":"'
+        yield b"a" * (settings.max_request_body_bytes - 7)
+        yield b'"}'
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            data=chunks(),
+            headers={**AUTH, "Content-Type": "application/json"},
+        )
+
+    assert response.status == 413
+
+
+@pytest.mark.asyncio
+async def test_authenticated_duplicate_key_json_is_rejected_before_handler(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager())
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            data=b'{"model":"codex","model":"other"}',
+            headers={**AUTH, "Content-Type": "application/json"},
+        )
+        body = await response.json()
+
+    assert response.status == 400
+    assert body["error"]["code"] == "invalid_json"
+    assert "codex" not in repr(body)
+    assert "other" not in repr(body)
+
+
+@pytest.mark.asyncio
 async def test_valid_bearer_reaches_protected_handler(tmp_path: Path) -> None:
     app = create_app(_settings(tmp_path), NeverCredentialManager())
 
     async with TestClient(TestServer(app)) as client:
-        response = await client.post("/v1/chat/completions", data=b"{}", headers=AUTH)
+        response = await client.post(
+            "/v1/chat/completions",
+            data=b"{}",
+            headers={**AUTH, "Content-Type": "application/json"},
+        )
 
     assert response.status == 501
 
