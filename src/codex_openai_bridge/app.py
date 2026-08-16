@@ -227,6 +227,7 @@ async def _chat_completions(request: web.Request) -> web.Response:
             document,
             public_model=settings.public_model,
             max_messages=settings.max_messages,
+            max_tools=settings.max_tools,
         )
         payload = chat_request_to_responses(chat_request, upstream_model=settings.upstream_model)
     except ChatRequestError:

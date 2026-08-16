@@ -7,7 +7,8 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -62,6 +63,20 @@ class FakeUpstream:
     ) -> object:
         self.calls.append((credential, payload))
         return self.response
+
+
+class SequenceFakeUpstream(FakeUpstream):
+    def __init__(self, responses: list[object]) -> None:
+        super().__init__({})
+        self.responses = responses
+
+    async def create_response(
+        self,
+        credential: Credential,
+        payload: dict[str, Any],
+    ) -> object:
+        self.calls.append((credential, payload))
+        return self.responses[len(self.calls) - 1]
 
 
 class FailingUpstream:
@@ -219,6 +234,271 @@ async def test_authenticated_text_chat_completion_tracer_bullet(tmp_path: Path) 
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_two_request_function_tool_round_trip_uses_injected_upstream_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    credential = _credential()
+    manager = StaticCredentialManager(credential)
+    upstream = SequenceFakeUpstream(
+        [
+            {
+                "id": "resp_call",
+                "status": "completed",
+                "created_at": 1_723_456_789,
+                "output": [
+                    {
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": "call_weather",
+                        "name": "lookup_weather",
+                        "arguments": '{"city":"Tokyo"}',
+                    }
+                ],
+                "usage": {"input_tokens": 4, "output_tokens": 3, "total_tokens": 7},
+            },
+            {
+                "id": "resp_final",
+                "status": "completed",
+                "created_at": 1_723_456_790,
+                "output": [
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "It is sunny."}],
+                    }
+                ],
+                "usage": {"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+            },
+        ]
+    )
+    app = create_app(settings, manager, upstream=upstream)
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "lookup_weather",
+            "description": "Look up weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+            "strict": True,
+        },
+    }
+    documents = [
+        {
+            "model": "codex",
+            "messages": [{"role": "user", "content": "Weather?"}],
+            "tools": [tool],
+            "tool_choice": "required",
+            "parallel_tool_calls": True,
+        },
+        {
+            "model": "codex",
+            "messages": [
+                {"role": "user", "content": "Weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_weather",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_weather",
+                                "arguments": '{"city":"Tokyo"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_weather",
+                    "content": '{"condition":"sunny"}',
+                },
+            ],
+            "tools": [tool],
+        },
+    ]
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return documents.pop(0)
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    request = cast(Any, SimpleNamespace(app=app))
+    first_response = await app_module._chat_completions(request)
+    second_response = await app_module._chat_completions(request)
+    assert isinstance(first_response.body, (bytes, bytearray))
+    assert isinstance(second_response.body, (bytes, bytearray))
+    first_body = json.loads(first_response.body)
+    second_body = json.loads(second_response.body)
+
+    assert first_response.status == 200
+    assert first_body["choices"][0] == {
+        "index": 0,
+        "message": {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_weather",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup_weather",
+                        "arguments": '{"city":"Tokyo"}',
+                    },
+                }
+            ],
+        },
+        "finish_reason": "tool_calls",
+    }
+    assert second_response.status == 200
+    assert second_body["choices"][0]["message"] == {
+        "role": "assistant",
+        "content": "It is sunny.",
+    }
+    assert manager.calls == [False, False]
+    assert upstream.calls[0] == (
+        credential,
+        {
+            "model": settings.upstream_model,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Weather?"}],
+                }
+            ],
+            "store": False,
+            "stream": False,
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "lookup_weather",
+                    "description": "Look up weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                    "strict": True,
+                }
+            ],
+            "tool_choice": "required",
+            "parallel_tool_calls": True,
+        },
+    )
+    assert upstream.calls[1][1]["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "Weather?"}]},
+        {
+            "type": "function_call",
+            "call_id": "call_weather",
+            "name": "lookup_weather",
+            "arguments": '{"city":"Tokyo"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_weather",
+            "output": '{"condition":"sunny"}',
+        },
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "document",
+    [
+        {
+            "model": "codex",
+            "messages": [{"role": "user", "content": "text"}],
+            "tools": [
+                {"type": "function", "function": {"name": "one", "parameters": {}}},
+                {"type": "function", "function": {"name": "two", "parameters": {}}},
+            ],
+        },
+        {
+            "model": "codex",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_secret",
+                            "type": "function",
+                            "function": {"name": "f", "arguments": "SENSITIVE_ARGUMENTS"},
+                        }
+                    ],
+                }
+            ],
+        },
+    ],
+)
+async def test_invalid_tool_request_is_sanitized_before_credentials_direct(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    document: object,
+) -> None:
+    settings = replace(_settings(tmp_path), max_tools=1)
+    app = create_app(settings, NeverCredentialManager(), upstream=FakeUpstream({}))
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return document
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    response = await app_module._chat_completions(cast(Any, SimpleNamespace(app=app)))
+    assert isinstance(response.body, (bytes, bytearray))
+    body = json.loads(response.body)
+
+    assert response.status == 400
+    assert body["error"]["code"] == "invalid_request"
+    assert "SENSITIVE_ARGUMENTS" not in repr(body)
+
+
+@pytest.mark.asyncio
+async def test_malformed_upstream_tool_call_is_sanitized_502_direct(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    manager = StaticCredentialManager(_credential())
+    upstream = FakeUpstream(
+        {
+            "id": "resp_bad",
+            "status": "completed",
+            "created_at": 1,
+            "output": [
+                {
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "call_1",
+                    "name": "f",
+                    "arguments": '{"secret":NaN}',
+                }
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }
+    )
+    app = create_app(_settings(tmp_path), manager, upstream=upstream)
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return {"model": "codex", "messages": [{"role": "user", "content": "text"}]}
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    response = await app_module._chat_completions(cast(Any, SimpleNamespace(app=app)))
+    assert isinstance(response.body, (bytes, bytearray))
+    body = json.loads(response.body)
+
+    assert response.status == 502
+    assert body["error"]["code"] == "upstream_error"
+    assert "secret" not in repr(body)
+    assert "secret" not in caplog.text
+    assert manager.calls == [False]
 
 
 @pytest.mark.asyncio
