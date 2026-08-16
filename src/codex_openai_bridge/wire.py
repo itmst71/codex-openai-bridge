@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -50,6 +51,21 @@ class NamedFunctionToolChoice:
 
 
 @dataclass(frozen=True, slots=True)
+class JsonObjectResponseFormat:
+    """A validated request for native JSON-object output."""
+
+
+@dataclass(frozen=True, slots=True)
+class JsonSchemaResponseFormat:
+    """A validated native structured-output schema."""
+
+    name: str
+    schema: dict[str, Any]
+    description: str | None
+    strict: bool | None
+
+
+@dataclass(frozen=True, slots=True)
 class ChatCompletionRequest:
     """The closed Chat Completions request contract."""
 
@@ -58,6 +74,7 @@ class ChatCompletionRequest:
     tools: tuple[FunctionTool, ...] = ()
     tool_choice: Literal["auto", "required", "none"] | NamedFunctionToolChoice | None = None
     parallel_tool_calls: bool | None = None
+    response_format: JsonObjectResponseFormat | JsonSchemaResponseFormat | None = None
 
 
 def _reject_json_constant(_value: str) -> None:
@@ -97,12 +114,219 @@ def _validate_arguments_object(value: object) -> str:
     return value
 
 
+_SCHEMA_KEYWORDS = {
+    "$defs",
+    "$ref",
+    "type",
+    "properties",
+    "required",
+    "additionalProperties",
+    "items",
+    "enum",
+    "const",
+    "anyOf",
+    "description",
+    "title",
+}
+_SCHEMA_TYPES = {"null", "boolean", "object", "array", "number", "integer", "string"}
+_LOCAL_DEFS_REF = re.compile(r"#/(?:\$defs)/(?:[^/~]|~[01])+(?:/(?:[^/~]|~[01])+)*\Z")
+_FORMAT_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
+
+
+def _validate_bounded_json_tree(
+    root: object,
+    *,
+    max_depth: int,
+    max_nodes: int,
+    max_string_bytes: int,
+) -> None:
+    nodes = 0
+    stack: list[tuple[object, int]] = [(root, 1)]
+    while stack:
+        item, depth = stack.pop()
+        nodes += 1
+        if depth > max_depth or nodes > max_nodes:
+            raise ChatRequestError("invalid request")
+        if type(item) is dict:
+            if nodes + len(stack) + len(item) > max_nodes:
+                raise ChatRequestError("invalid request")
+            for key, value in item.items():
+                if type(key) is not str:
+                    raise ChatRequestError("invalid request")
+                try:
+                    encoded_key = key.encode("utf-8", errors="strict")
+                except UnicodeError:
+                    raise ChatRequestError("invalid request") from None
+                if len(encoded_key) > max_string_bytes:
+                    raise ChatRequestError("invalid request")
+                stack.append((value, depth + 1))
+        elif type(item) is list:
+            if nodes + len(stack) + len(item) > max_nodes:
+                raise ChatRequestError("invalid request")
+            stack.extend((value, depth + 1) for value in item)
+        elif type(item) is str:
+            try:
+                encoded_item = item.encode("utf-8", errors="strict")
+            except UnicodeError:
+                raise ChatRequestError("invalid request") from None
+            if len(encoded_item) > max_string_bytes:
+                raise ChatRequestError("invalid request")
+        elif type(item) is float:
+            if not math.isfinite(item):
+                raise ChatRequestError("invalid request")
+        elif item is not None and type(item) not in (bool, int):
+            raise ChatRequestError("invalid request")
+
+
+def _is_json_scalar(value: object) -> bool:
+    return value is None or type(value) in (str, bool, int, float)
+
+
+def _validate_schema_subset(schema: dict[str, Any]) -> None:
+    stack: list[dict[str, Any]] = [schema]
+    while stack:
+        candidate = stack.pop()
+        if not set(candidate) <= _SCHEMA_KEYWORDS:
+            raise ChatRequestError("invalid request")
+
+        if "$ref" in candidate:
+            ref = candidate["$ref"]
+            if type(ref) is not str or _LOCAL_DEFS_REF.fullmatch(ref) is None:
+                raise ChatRequestError("invalid request")
+
+        if "type" in candidate:
+            schema_type = candidate["type"]
+            if type(schema_type) is str:
+                if schema_type not in _SCHEMA_TYPES:
+                    raise ChatRequestError("invalid request")
+            elif type(schema_type) is list:
+                if not schema_type or any(
+                    type(item) is not str or item not in _SCHEMA_TYPES for item in schema_type
+                ):
+                    raise ChatRequestError("invalid request")
+                if len(set(schema_type)) != len(schema_type):
+                    raise ChatRequestError("invalid request")
+            else:
+                raise ChatRequestError("invalid request")
+
+        for keyword in ("description", "title"):
+            if keyword in candidate and type(candidate[keyword]) is not str:
+                raise ChatRequestError("invalid request")
+
+        if (
+            "additionalProperties" in candidate
+            and type(candidate["additionalProperties"]) is not bool
+        ):
+            raise ChatRequestError("invalid request")
+
+        if "required" in candidate:
+            required = candidate["required"]
+            if type(required) is not list or any(type(item) is not str for item in required):
+                raise ChatRequestError("invalid request")
+            if len(set(required)) != len(required):
+                raise ChatRequestError("invalid request")
+
+        if "enum" in candidate:
+            enum = candidate["enum"]
+            if (
+                type(enum) is not list
+                or not enum
+                or any(not _is_json_scalar(item) for item in enum)
+            ):
+                raise ChatRequestError("invalid request")
+        if "const" in candidate and not _is_json_scalar(candidate["const"]):
+            raise ChatRequestError("invalid request")
+
+        if "items" in candidate:
+            items = candidate["items"]
+            if type(items) is not dict:
+                raise ChatRequestError("invalid request")
+            stack.append(items)
+
+        if "anyOf" in candidate:
+            any_of = candidate["anyOf"]
+            if (
+                type(any_of) is not list
+                or not any_of
+                or any(type(item) is not dict for item in any_of)
+            ):
+                raise ChatRequestError("invalid request")
+            stack.extend(any_of)
+
+        for keyword in ("properties", "$defs"):
+            if keyword not in candidate:
+                continue
+            definitions = candidate[keyword]
+            if type(definitions) is not dict or any(
+                type(name) is not str or type(value) is not dict
+                for name, value in definitions.items()
+            ):
+                raise ChatRequestError("invalid request")
+            stack.extend(definitions.values())
+
+
+def _parse_response_format(
+    value: object,
+    *,
+    max_json_depth: int,
+    max_json_nodes: int,
+    max_string_bytes: int,
+) -> JsonObjectResponseFormat | JsonSchemaResponseFormat:
+    if type(value) is not dict or type(value.get("type")) is not str:
+        raise ChatRequestError("invalid request")
+    if value["type"] == "json_object":
+        if set(value) != {"type"}:
+            raise ChatRequestError("invalid request")
+        return JsonObjectResponseFormat()
+    if value["type"] != "json_schema" or set(value) != {"type", "json_schema"}:
+        raise ChatRequestError("invalid request")
+    raw_format = value["json_schema"]
+    if (
+        type(raw_format) is not dict
+        or not {"name", "schema"} <= set(raw_format)
+        or not set(raw_format) <= {"name", "description", "schema", "strict"}
+    ):
+        raise ChatRequestError("invalid request")
+    name = raw_format["name"]
+    description = raw_format.get("description")
+    strict = raw_format.get("strict")
+    schema = raw_format["schema"]
+    if (
+        type(name) is not str
+        or _FORMAT_NAME.fullmatch(name) is None
+        or type(schema) is not dict
+        or ("description" in raw_format and (type(description) is not str or not description))
+        or ("strict" in raw_format and type(strict) is not bool)
+    ):
+        raise ChatRequestError("invalid request")
+    _validate_bounded_json_tree(
+        schema,
+        max_depth=max_json_depth,
+        max_nodes=max_json_nodes,
+        max_string_bytes=max_string_bytes,
+    )
+    _validate_schema_subset(schema)
+    try:
+        owned_schema = deepcopy(schema)
+    except (MemoryError, RecursionError):
+        raise ChatRequestError("invalid request") from None
+    return JsonSchemaResponseFormat(
+        name=name,
+        description=description,
+        schema=owned_schema,
+        strict=strict,
+    )
+
+
 def parse_chat_completion_request(
     value: object,
     *,
     public_model: str,
     max_messages: int,
     max_tools: int,
+    max_json_depth: int,
+    max_json_nodes: int,
+    max_string_bytes: int,
 ) -> ChatCompletionRequest:
     """Parse without coercion and reject every unsupported field."""
     if (
@@ -110,7 +334,13 @@ def parse_chat_completion_request(
         or type(public_model) is not str
         or type(max_messages) is not int
         or type(max_tools) is not int
+        or type(max_json_depth) is not int
+        or type(max_json_nodes) is not int
+        or type(max_string_bytes) is not int
         or max_tools <= 0
+        or max_json_depth <= 0
+        or max_json_nodes <= 0
+        or max_string_bytes <= 0
     ):
         raise ChatRequestError("invalid request")
     document: dict[str, Any] = value
@@ -123,6 +353,7 @@ def parse_chat_completion_request(
         "tools",
         "tool_choice",
         "parallel_tool_calls",
+        "response_format",
     }
     if not set(document) <= allowed or "model" not in document or "messages" not in document:
         raise ChatRequestError("invalid request")
@@ -295,6 +526,15 @@ def parse_chat_completion_request(
             raise ChatRequestError("invalid request")
         parallel_tool_calls = candidate_parallel
 
+    response_format: JsonObjectResponseFormat | JsonSchemaResponseFormat | None = None
+    if "response_format" in document:
+        response_format = _parse_response_format(
+            document["response_format"],
+            max_json_depth=max_json_depth,
+            max_json_nodes=max_json_nodes,
+            max_string_bytes=max_string_bytes,
+        )
+
     if "stream" in document and document["stream"] is not False:
         raise ChatRequestError("invalid request")
     token_fields = [name for name in ("max_tokens", "max_completion_tokens") if name in document]
@@ -312,4 +552,5 @@ def parse_chat_completion_request(
         tools=tuple(tools),
         tool_choice=tool_choice,
         parallel_tool_calls=parallel_tool_calls,
+        response_format=response_format,
     )

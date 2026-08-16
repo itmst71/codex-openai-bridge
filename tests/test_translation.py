@@ -11,6 +11,8 @@ from codex_openai_bridge.wire import (
     ChatCompletionRequest,
     ChatMessage,
     FunctionTool,
+    JsonObjectResponseFormat,
+    JsonSchemaResponseFormat,
     NamedFunctionToolChoice,
     ToolCall,
 )
@@ -134,6 +136,106 @@ def test_specific_tool_choice_and_parallel_setting_map_to_responses_shape() -> N
 
     assert payload["tool_choice"] == {"type": "function", "name": "f"}
     assert payload["parallel_tool_calls"] is True
+
+
+def test_json_object_response_format_maps_to_exact_native_text_format() -> None:
+    request = ChatCompletionRequest(
+        messages=(ChatMessage(role="user", content="return JSON"),),
+        max_output_tokens=None,
+        response_format=JsonObjectResponseFormat(),
+    )
+
+    payload = chat_request_to_responses(request, upstream_model="upstream-model")
+
+    assert payload == {
+        "model": "upstream-model",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "return JSON"}]}],
+        "store": False,
+        "stream": False,
+        "text": {"format": {"type": "json_object"}},
+    }
+
+
+def test_json_schema_response_format_flattens_exactly_without_aliasing() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    request = ChatCompletionRequest(
+        messages=(ChatMessage(role="user", content="answer"),),
+        max_output_tokens=20,
+        response_format=JsonSchemaResponseFormat(
+            name="answer_result",
+            description="One answer",
+            schema=schema,
+            strict=True,
+        ),
+    )
+
+    payload = chat_request_to_responses(request, upstream_model="upstream-model")
+
+    assert payload["text"] == {
+        "format": {
+            "type": "json_schema",
+            "name": "answer_result",
+            "description": "One answer",
+            "schema": {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    }
+    translated_schema = payload["text"]["format"]["schema"]
+    translated_schema["properties"] = {}
+    parsed_format = request.response_format
+    assert isinstance(parsed_format, JsonSchemaResponseFormat)
+    assert parsed_format.schema["properties"] == {"answer": {"type": "string"}}
+
+
+def test_optional_json_schema_fields_are_omitted_and_tools_coexist_exactly() -> None:
+    request = ChatCompletionRequest(
+        messages=(ChatMessage(role="user", content="use a tool then answer"),),
+        max_output_tokens=None,
+        tools=(
+            FunctionTool(
+                name="lookup",
+                description=None,
+                parameters={"type": "object"},
+                strict=None,
+            ),
+        ),
+        tool_choice=NamedFunctionToolChoice(name="lookup"),
+        parallel_tool_calls=False,
+        response_format=JsonSchemaResponseFormat(
+            name="result",
+            description=None,
+            schema={"type": "object"},
+            strict=None,
+        ),
+    )
+
+    payload = chat_request_to_responses(request, upstream_model="upstream-model")
+
+    assert payload == {
+        "model": "upstream-model",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "use a tool then answer"}],
+            }
+        ],
+        "store": False,
+        "stream": False,
+        "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+        "tool_choice": {"type": "function", "name": "lookup"},
+        "parallel_tool_calls": False,
+        "text": {"format": {"type": "json_schema", "name": "result", "schema": {"type": "object"}}},
+    }
 
 
 def test_parallel_tool_history_maps_calls_then_results_in_message_order() -> None:

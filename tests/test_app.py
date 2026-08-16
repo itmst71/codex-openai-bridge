@@ -237,6 +237,152 @@ async def test_authenticated_text_chat_completion_tracer_bullet(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_format", "expected_text"),
+    [
+        (
+            {"type": "json_object"},
+            {"format": {"type": "json_object"}},
+        ),
+        (
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer_result",
+                    "description": "One answer",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}},
+                        "required": ["answer"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                },
+            },
+            {
+                "format": {
+                    "type": "json_schema",
+                    "name": "answer_result",
+                    "description": "One answer",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}},
+                        "required": ["answer"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            },
+        ),
+    ],
+)
+async def test_structured_output_reaches_injected_upstream_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    response_format: dict[str, object],
+    expected_text: dict[str, object],
+) -> None:
+    settings = _settings(tmp_path)
+    credential = _credential()
+    manager = StaticCredentialManager(credential)
+    upstream = FakeUpstream(
+        {
+            "id": "resp_structured",
+            "status": "completed",
+            "created_at": 1_723_456_789,
+            "output": [
+                {
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": '{"answer":"yes"}'}],
+                }
+            ],
+            "usage": {"input_tokens": 2, "output_tokens": 4, "total_tokens": 6},
+        }
+    )
+    app = create_app(settings, manager, upstream=upstream)
+    document = {
+        "model": "codex",
+        "messages": [{"role": "user", "content": "answer"}],
+        "response_format": response_format,
+    }
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return document
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    response = await app_module._chat_completions(cast(Any, SimpleNamespace(app=app)))
+    assert isinstance(response.body, (bytes, bytearray))
+    body = json.loads(response.body)
+
+    assert response.status == 200
+    assert body["choices"][0]["message"]["content"] == '{"answer":"yes"}'
+    assert upstream.calls == [
+        (
+            credential,
+            {
+                "model": settings.upstream_model,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "answer"}],
+                    }
+                ],
+                "store": False,
+                "stream": False,
+                "text": expected_text,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("settings_overrides", "schema"),
+    [
+        ({}, {"patternProperties": {}}),
+        ({"max_json_depth": 2}, {"anyOf": [{}]}),
+        ({"max_json_nodes": 3}, {"anyOf": [{}, {}]}),
+        ({"max_string_bytes": 5}, {"title": "aaaaaa"}),
+    ],
+)
+async def test_invalid_or_overbound_schema_is_sanitized_before_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    settings_overrides: dict[str, int],
+    schema: dict[str, object],
+) -> None:
+    settings = replace(_settings(tmp_path), **cast(Any, settings_overrides))
+    app = create_app(settings, NeverCredentialManager(), upstream=FakeUpstream({}))
+    document = {
+        "model": "codex",
+        "messages": [{"role": "user", "content": "answer"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "r", "schema": schema},
+        },
+    }
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return document
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    response = await app_module._chat_completions(cast(Any, SimpleNamespace(app=app)))
+    assert isinstance(response.body, (bytes, bytearray))
+
+    assert response.status == 400
+    assert json.loads(response.body) == {
+        "error": {
+            "message": "Request is invalid",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "invalid_request",
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_two_request_function_tool_round_trip_uses_injected_upstream_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

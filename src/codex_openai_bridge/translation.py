@@ -7,7 +7,11 @@ import math
 from copy import deepcopy
 from typing import Any
 
-from codex_openai_bridge.wire import ChatCompletionRequest, NamedFunctionToolChoice
+from codex_openai_bridge.wire import (
+    ChatCompletionRequest,
+    JsonObjectResponseFormat,
+    NamedFunctionToolChoice,
+)
 
 
 class UpstreamResponseError(ValueError):
@@ -87,6 +91,20 @@ def chat_request_to_responses(
             payload["tool_choice"] = request.tool_choice
     if request.parallel_tool_calls is not None:
         payload["parallel_tool_calls"] = request.parallel_tool_calls
+    if request.response_format is not None:
+        if isinstance(request.response_format, JsonObjectResponseFormat):
+            response_format: dict[str, Any] = {"type": "json_object"}
+        else:
+            response_format = {
+                "type": "json_schema",
+                "name": request.response_format.name,
+                "schema": deepcopy(request.response_format.schema),
+            }
+            if request.response_format.description is not None:
+                response_format["description"] = request.response_format.description
+            if request.response_format.strict is not None:
+                response_format["strict"] = request.response_format.strict
+        payload["text"] = {"format": response_format}
     return payload
 
 

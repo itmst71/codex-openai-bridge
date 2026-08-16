@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from codex_openai_bridge.wire import (
@@ -7,6 +9,8 @@ from codex_openai_bridge.wire import (
     ChatMessage,
     ChatRequestError,
     FunctionTool,
+    JsonObjectResponseFormat,
+    JsonSchemaResponseFormat,
     NamedFunctionToolChoice,
     ToolCall,
     parse_chat_completion_request,
@@ -19,6 +23,9 @@ def _parse(value: object) -> ChatCompletionRequest:
         public_model="codex",
         max_messages=8,
         max_tools=3,
+        max_json_depth=16,
+        max_json_nodes=128,
+        max_string_bytes=128,
     )
 
 
@@ -95,6 +102,9 @@ def test_rejects_malformed_messages_and_configured_count_overflow(messages: obje
             public_model="codex",
             max_messages=2,
             max_tools=3,
+            max_json_depth=16,
+            max_json_nodes=128,
+            max_string_bytes=128,
         )
 
 
@@ -150,6 +160,353 @@ def test_stream_may_be_absent_or_exact_false() -> None:
     )
 
     assert with_false == without_stream
+
+
+def test_parses_exact_json_object_response_format() -> None:
+    request = _parse(
+        {
+            "model": "codex",
+            "messages": [{"role": "user", "content": "return JSON"}],
+            "response_format": {"type": "json_object"},
+        }
+    )
+
+    assert request.response_format == JsonObjectResponseFormat()
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    [
+        None,
+        "json_object",
+        {},
+        {"type": "json_object", "extra": True},
+        {"type": "json_object", "json_schema": {}},
+        {"type": "text"},
+        {"type": True},
+    ],
+)
+def test_rejects_nonexact_json_object_response_format(response_format: object) -> None:
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse(
+            {
+                "model": "codex",
+                "messages": [{"role": "user", "content": "return JSON"}],
+                "response_format": response_format,
+            }
+        )
+
+
+def test_parses_closed_json_schema_response_format_and_owns_schema() -> None:
+    schema = {
+        "$defs": {
+            "Address": {
+                "type": "object",
+                "properties": {"city": {"type": "string", "title": "City"}},
+                "required": ["city"],
+                "additionalProperties": False,
+            }
+        },
+        "type": "object",
+        "properties": {
+            "address": {"$ref": "#/$defs/Address"},
+            "tags": {
+                "type": "array",
+                "items": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            },
+            "kind": {"enum": ["home", "work", None]},
+            "version": {"const": 1},
+        },
+        "required": ["address", "tags", "kind", "version"],
+        "additionalProperties": False,
+        "description": "An address result",
+        "title": "Result",
+    }
+    document = {
+        "model": "codex",
+        "messages": [{"role": "user", "content": "return an address"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "address_result-1",
+                "description": "Structured address",
+                "schema": schema,
+                "strict": True,
+            },
+        },
+    }
+
+    request = parse_chat_completion_request(
+        document,
+        public_model="codex",
+        max_messages=8,
+        max_tools=3,
+        max_json_depth=16,
+        max_json_nodes=128,
+        max_string_bytes=128,
+    )
+
+    assert request.response_format == JsonSchemaResponseFormat(
+        name="address_result-1",
+        description="Structured address",
+        schema=schema,
+        strict=True,
+    )
+    schema["properties"] = {}
+    parsed_format = request.response_format
+    assert isinstance(parsed_format, JsonSchemaResponseFormat)
+    assert "address" in parsed_format.schema["properties"]
+
+
+def test_json_schema_name_accepts_exact_64_character_limit() -> None:
+    request = _parse(
+        {
+            "model": "codex",
+            "messages": [{"role": "user", "content": "return JSON"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "a" * 64, "schema": {}},
+            },
+        }
+    )
+
+    parsed_format = request.response_format
+    assert isinstance(parsed_format, JsonSchemaResponseFormat)
+    assert parsed_format.name == "a" * 64
+
+
+@pytest.mark.parametrize(
+    "json_schema",
+    [
+        {},
+        {"name": "result"},
+        {"schema": {}},
+        {"name": "result", "schema": {}, "extra": True},
+        {"name": True, "schema": {}},
+        {"name": "", "schema": {}},
+        {"name": "a" * 65, "schema": {}},
+        {"name": "not safe", "schema": {}},
+        {"name": "café", "schema": {}},
+        {"name": "result", "schema": []},
+        {"name": "result", "schema": {}, "description": ""},
+        {"name": "result", "schema": {}, "description": None},
+        {"name": "result", "schema": {}, "strict": 1},
+        {"name": "result", "schema": {}, "strict": None},
+    ],
+)
+def test_rejects_malformed_json_schema_envelope(json_schema: object) -> None:
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse(
+            {
+                "model": "codex",
+                "messages": [{"role": "user", "content": "return JSON"}],
+                "response_format": {"type": "json_schema", "json_schema": json_schema},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    [
+        {"type": "json_schema"},
+        {"type": "json_schema", "json_schema": {"name": "result", "schema": {}}, "x": 1},
+        {"type": "json_schema", "json_schema": []},
+    ],
+)
+def test_rejects_nonexact_json_schema_response_format(response_format: object) -> None:
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse(
+            {
+                "model": "codex",
+                "messages": [{"role": "user", "content": "return JSON"}],
+                "response_format": response_format,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"patternProperties": {}},
+        {"unevaluatedProperties": False},
+        {"propertyNames": {}},
+        {"allOf": []},
+        {"oneOf": []},
+        {"not": {}},
+        {"if": {}, "then": {}},
+        {"$ref": "https://example.invalid/schema"},
+        {"$ref": "#/properties/value"},
+        {"$ref": "#/$defs/"},
+        {"type": "date"},
+        {"type": []},
+        {"type": ["string", "string"]},
+        {"type": ["string", "date"]},
+        {"properties": []},
+        {"properties": {"value": []}},
+        {"required": "value"},
+        {"required": ["value", "value"]},
+        {"required": [1]},
+        {"additionalProperties": {}},
+        {"items": []},
+        {"enum": []},
+        {"enum": [{}]},
+        {"const": []},
+        {"anyOf": []},
+        {"anyOf": [None]},
+        {"description": None},
+        {"title": 1},
+        {"$defs": []},
+        {"$defs": {"Value": []}},
+    ],
+)
+def test_rejects_unsupported_or_malformed_schema_subset(schema: object) -> None:
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse(
+            {
+                "model": "codex",
+                "messages": [{"role": "user", "content": "return JSON"}],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "result", "schema": schema},
+                },
+            }
+        )
+
+
+def _parse_schema_with_bounds(
+    schema: dict[Any, Any],
+    *,
+    max_json_depth: int,
+    max_json_nodes: int,
+    max_string_bytes: int,
+) -> ChatCompletionRequest:
+    return parse_chat_completion_request(
+        {
+            "model": "codex",
+            "messages": [{"role": "user", "content": "x"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "r", "schema": schema},
+            },
+        },
+        public_model="codex",
+        max_messages=1,
+        max_tools=1,
+        max_json_depth=max_json_depth,
+        max_json_nodes=max_json_nodes,
+        max_string_bytes=max_string_bytes,
+    )
+
+
+def test_schema_depth_accepts_exact_limit_and_rejects_one_over() -> None:
+    schema: dict[Any, Any] = {"anyOf": [{}]}
+
+    assert (
+        _parse_schema_with_bounds(
+            schema, max_json_depth=3, max_json_nodes=3, max_string_bytes=16
+        ).response_format
+        is not None
+    )
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse_schema_with_bounds(schema, max_json_depth=2, max_json_nodes=3, max_string_bytes=16)
+
+
+def test_schema_nodes_accept_exact_limit_and_reject_one_over() -> None:
+    schema: dict[Any, Any] = {"anyOf": [{}, {}]}
+
+    assert (
+        _parse_schema_with_bounds(
+            schema, max_json_depth=3, max_json_nodes=4, max_string_bytes=16
+        ).response_format
+        is not None
+    )
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse_schema_with_bounds(schema, max_json_depth=3, max_json_nodes=3, max_string_bytes=16)
+
+
+def test_schema_strings_accept_exact_utf8_limit_and_reject_one_over() -> None:
+    schema = {"title": "ééé"}
+
+    assert (
+        _parse_schema_with_bounds(
+            schema, max_json_depth=2, max_json_nodes=2, max_string_bytes=6
+        ).response_format
+        is not None
+    )
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse_schema_with_bounds(schema, max_json_depth=2, max_json_nodes=2, max_string_bytes=5)
+
+
+@pytest.mark.parametrize(
+    ("exact_schema", "over_schema", "max_string_bytes"),
+    [
+        (
+            {"properties": {"a" * 10: {}}},
+            {"properties": {"a" * 11: {}}},
+            10,
+        ),
+        ({"$defs": {"a" * 5: {}}}, {"$defs": {"a" * 6: {}}}, 5),
+        ({"required": ["a" * 8]}, {"required": ["a" * 9]}, 8),
+    ],
+)
+def test_schema_named_positions_respect_exact_string_bound(
+    exact_schema: dict[str, object],
+    over_schema: dict[str, object],
+    max_string_bytes: int,
+) -> None:
+    assert (
+        _parse_schema_with_bounds(
+            exact_schema,
+            max_json_depth=3,
+            max_json_nodes=4,
+            max_string_bytes=max_string_bytes,
+        ).response_format
+        is not None
+    )
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse_schema_with_bounds(
+            over_schema,
+            max_json_depth=3,
+            max_json_nodes=4,
+            max_string_bytes=max_string_bytes,
+        )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"title": "\ud800"},
+        {"properties": {"\ud800": {}}},
+        {1: {}},
+        {"const": float("inf")},
+        {"const": object()},
+    ],
+)
+def test_schema_preflight_rejects_non_json_or_nonencodable_values(
+    schema: dict[object, object],
+) -> None:
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse_schema_with_bounds(schema, max_json_depth=8, max_json_nodes=16, max_string_bytes=16)
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"max_json_depth": 0, "max_json_nodes": 1, "max_string_bytes": 1},
+        {"max_json_depth": True, "max_json_nodes": 1, "max_string_bytes": 1},
+        {"max_json_depth": 1, "max_json_nodes": -1, "max_string_bytes": 1},
+        {"max_json_depth": 1, "max_json_nodes": 1, "max_string_bytes": 1.0},
+    ],
+)
+def test_parser_requires_exact_positive_schema_limits(limits: dict[str, object]) -> None:
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        parse_chat_completion_request(
+            {"model": "codex", "messages": [{"role": "user", "content": "x"}]},
+            public_model="codex",
+            max_messages=1,
+            max_tools=1,
+            **limits,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize("stream", [True, 0, 1, None, "false"])
@@ -248,6 +605,9 @@ def test_rejects_malformed_duplicate_or_over_limit_function_definitions(tools: o
             public_model="codex",
             max_messages=8,
             max_tools=1,
+            max_json_depth=16,
+            max_json_nodes=128,
+            max_string_bytes=128,
         )
 
 
