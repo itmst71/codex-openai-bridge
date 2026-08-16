@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codex-openai-bridge"
+version = "0.1.0"
+description = "Bounded OpenAI-compatible bridge for the Codex Responses backend"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "aiohttp>=3.12,<4",
+  "httpx>=0.28,<1",
+  "pydantic>=2.11,<3",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.17,<2",
+  "openai>=1.99,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codex_openai_bridge"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+asyncio_mode = "strict"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["codex_openai_bridge"]
+mypy_path = "src"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
