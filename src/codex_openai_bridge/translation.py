@@ -11,6 +11,9 @@ from codex_openai_bridge.wire import (
     ChatCompletionRequest,
     JsonObjectResponseFormat,
     NamedFunctionToolChoice,
+    ToolCall,
+    create_reasoning_binding_id,
+    encrypted_reasoning_data_digest,
 )
 
 
@@ -29,6 +32,7 @@ def chat_request_to_responses(
         "input": [],
         "store": False,
         "stream": False,
+        "include": ["reasoning.encrypted_content"],
     }
     instructions = [
         message.content
@@ -39,6 +43,8 @@ def chat_request_to_responses(
         payload["instructions"] = "\n\n".join(instructions)
     translated_input: list[dict[str, Any]] = []
     for message in request.messages:
+        for detail in message.reasoning_details:
+            translated_input.append({"type": "reasoning", "encrypted_content": detail.data})
         if message.role in {"user", "assistant"} and message.content is not None:
             translated_input.append(
                 {
@@ -49,6 +55,13 @@ def chat_request_to_responses(
                             "text": message.content,
                         }
                     ],
+                }
+            )
+        elif message.role == "assistant" and message.reasoning_details and not message.tool_calls:
+            translated_input.append(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": ""}],
                 }
             )
         for call in message.tool_calls:
@@ -151,10 +164,75 @@ def _validate_arguments_object(value: object) -> str:
     return value
 
 
-def responses_to_chat_completion(value: object, *, public_model: str) -> dict[str, Any]:
+def _validate_bounded_reasoning_tree(
+    root: object,
+    *,
+    max_depth: int,
+    max_nodes: int,
+    max_string_bytes: int,
+) -> None:
+    nodes = 0
+    stack: list[tuple[object, int]] = [(root, 1)]
+    while stack:
+        item, depth = stack.pop()
+        nodes += 1
+        if depth > max_depth or nodes > max_nodes:
+            raise UpstreamResponseError("invalid upstream response")
+        if type(item) is dict:
+            if nodes + len(stack) + len(item) > max_nodes:
+                raise UpstreamResponseError("invalid upstream response")
+            for key, child in item.items():
+                if type(key) is not str:
+                    raise UpstreamResponseError("invalid upstream response")
+                try:
+                    encoded_key = key.encode("utf-8", errors="strict")
+                except UnicodeError:
+                    raise UpstreamResponseError("invalid upstream response") from None
+                if len(encoded_key) > max_string_bytes:
+                    raise UpstreamResponseError("invalid upstream response")
+                stack.append((child, depth + 1))
+        elif type(item) is list:
+            if nodes + len(stack) + len(item) > max_nodes:
+                raise UpstreamResponseError("invalid upstream response")
+            stack.extend((child, depth + 1) for child in item)
+        elif type(item) is str:
+            try:
+                encoded_item = item.encode("utf-8", errors="strict")
+            except UnicodeError:
+                raise UpstreamResponseError("invalid upstream response") from None
+            if len(encoded_item) > max_string_bytes:
+                raise UpstreamResponseError("invalid upstream response")
+        elif type(item) is float:
+            if not math.isfinite(item):
+                raise UpstreamResponseError("invalid upstream response")
+        elif item is not None and type(item) not in (bool, int):
+            raise UpstreamResponseError("invalid upstream response")
+
+
+def responses_to_chat_completion(
+    value: object,
+    *,
+    public_model: str,
+    binding_key: str,
+    max_json_depth: int,
+    max_json_nodes: int,
+    max_string_bytes: int,
+) -> dict[str, Any]:
     """Convert one completed assistant Responses result to Chat Completions format."""
     try:
-        if type(value) is not dict:
+        if (
+            type(value) is not dict
+            or type(public_model) is not str
+            or not public_model
+            or type(binding_key) is not str
+            or not binding_key
+            or type(max_json_depth) is not int
+            or max_json_depth <= 0
+            or type(max_json_nodes) is not int
+            or max_json_nodes <= 0
+            or type(max_string_bytes) is not int
+            or max_string_bytes <= 0
+        ):
             raise UpstreamResponseError("invalid upstream response")
         response: dict[str, Any] = value
         response_id = response["id"]
@@ -174,11 +252,15 @@ def responses_to_chat_completion(value: object, *, public_model: str) -> dict[st
 
         assistant_messages: list[dict[str, Any]] = []
         function_calls: list[dict[str, str]] = []
+        reasoning_items: list[dict[str, Any]] = []
         call_ids: set[str] = set()
         for item in output:
             if type(item) is not dict:
                 raise UpstreamResponseError("invalid upstream response")
             if item.get("type") == "reasoning":
+                if len(reasoning_items) >= max_json_nodes:
+                    raise UpstreamResponseError("invalid upstream response")
+                reasoning_items.append(item)
                 continue
             if item.get("type") == "function_call":
                 required_call_fields = {"type", "status", "call_id", "name", "arguments"}
@@ -217,6 +299,30 @@ def responses_to_chat_completion(value: object, *, public_model: str) -> dict[st
             assistant_messages.append(item)
         if len(assistant_messages) > 1 or (not assistant_messages and not function_calls):
             raise UpstreamResponseError("invalid upstream response")
+        _validate_bounded_reasoning_tree(
+            reasoning_items,
+            max_depth=max_json_depth,
+            max_nodes=max_json_nodes,
+            max_string_bytes=max_string_bytes,
+        )
+        encrypted_items: list[str] = []
+        encrypted_digests: set[bytes] = set()
+        for item in reasoning_items:
+            if "encrypted_content" not in item:
+                continue
+            encrypted_content = item["encrypted_content"]
+            encrypted_digest = encrypted_reasoning_data_digest(
+                encrypted_content,
+                max_string_bytes=max_string_bytes,
+            )
+            if (
+                ("status" in item and item["status"] != "completed")
+                or encrypted_digest is None
+                or (encrypted_digest in encrypted_digests)
+            ):
+                raise UpstreamResponseError("invalid upstream response")
+            encrypted_digests.add(encrypted_digest)
+            encrypted_items.append(encrypted_content)
         text_parts: list[str] = []
         if assistant_messages:
             content = assistant_messages[0].get("content")
@@ -251,6 +357,41 @@ def responses_to_chat_completion(value: object, *, public_model: str) -> dict[st
             for call in function_calls
         ]
         finish_reason = "tool_calls"
+    if encrypted_items:
+        bound_calls = tuple(
+            ToolCall(
+                call_id=call["call_id"],
+                name=call["name"],
+                arguments=call["arguments"],
+            )
+            for call in function_calls
+        )
+        try:
+            public_reasoning_details = [
+                {
+                    "type": "reasoning.encrypted",
+                    "data": data,
+                    "format": "openai-responses-v1",
+                    "id": create_reasoning_binding_id(
+                        binding_key=binding_key,
+                        content=message["content"],
+                        tool_calls=bound_calls,
+                        index=index,
+                        data=data,
+                    ),
+                    "index": index,
+                }
+                for index, data in enumerate(encrypted_items)
+            ]
+        except ValueError:
+            raise UpstreamResponseError("invalid upstream response") from None
+        _validate_bounded_reasoning_tree(
+            public_reasoning_details,
+            max_depth=max_json_depth,
+            max_nodes=max_json_nodes,
+            max_string_bytes=max_string_bytes,
+        )
+        message["reasoning_details"] = public_reasoning_details
 
     return {
         "id": response_id,

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
 import json
 import math
 import re
@@ -24,6 +28,15 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ReasoningDetail:
+    """One authenticated encrypted Codex reasoning state item."""
+
+    data: str
+    binding_id: str
+    index: int
+
+
+@dataclass(frozen=True, slots=True)
 class ChatMessage:
     """One validated Chat Completions message."""
 
@@ -31,6 +44,7 @@ class ChatMessage:
     content: str | None
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
+    reasoning_details: tuple[ReasoningDetail, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +145,131 @@ _SCHEMA_KEYWORDS = {
 _SCHEMA_TYPES = {"null", "boolean", "object", "array", "number", "integer", "string"}
 _LOCAL_DEFS_REF = re.compile(r"#/(?:\$defs)/(?:[^/~]|~[01])+(?:/(?:[^/~]|~[01])+)*\Z")
 _FORMAT_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
+_BASE64_CORE = re.compile(r"[A-Za-z0-9+/_-]+={0,2}\Z", re.ASCII)
+_REASONING_BINDING_PREFIX = "cobr_r1_"
+
+
+def encrypted_reasoning_data_digest(value: object, *, max_string_bytes: int) -> bytes | None:
+    """Validate strict base64 and return a digest without retaining decoded bytes."""
+    if type(value) is not str or type(max_string_bytes) is not int or max_string_bytes <= 0:
+        return None
+    try:
+        encoded = value.encode("ascii", errors="strict")
+    except UnicodeError:
+        return None
+    if not encoded or len(encoded) > max_string_bytes or _BASE64_CORE.fullmatch(value) is None:
+        return None
+    padding = len(value) - len(value.rstrip("="))
+    core = value[:-padding] if padding else value
+    if not core or padding > 2 or "=" in core:
+        return None
+    has_standard = "+" in core or "/" in core
+    has_urlsafe = "-" in core or "_" in core
+    if has_standard and has_urlsafe:
+        return None
+    remainder = len(core) % 4
+    if remainder == 1:
+        return None
+    required_padding = (4 - remainder) % 4
+    if padding and (padding != required_padding or len(value) % 4 != 0):
+        return None
+    try:
+        decoded = base64.b64decode(
+            core.encode("ascii") + b"=" * required_padding,
+            altchars=b"-_" if has_urlsafe else None,
+            validate=True,
+        )
+    except (binascii.Error, ValueError):
+        return None
+    if not decoded:
+        return None
+    canonical = base64.urlsafe_b64encode(decoded) if has_urlsafe else base64.b64encode(decoded)
+    if encoded not in (canonical, canonical.rstrip(b"=")):
+        return None
+    digest = hashlib.sha256(decoded).digest()
+    del decoded
+    return digest
+
+
+def encrypted_reasoning_data_is_valid(value: object, *, max_string_bytes: int) -> bool:
+    """Return whether opaque encrypted state is bounded strict base64."""
+    return encrypted_reasoning_data_digest(value, max_string_bytes=max_string_bytes) is not None
+
+
+def _public_tool_call_projection(tool_calls: tuple[ToolCall, ...]) -> list[dict[str, object]]:
+    return [
+        {
+            "id": call.call_id,
+            "type": "function",
+            "function": {"name": call.name, "arguments": call.arguments},
+        }
+        for call in tool_calls
+    ]
+
+
+def create_reasoning_binding_id(
+    *,
+    binding_key: str,
+    content: str | None,
+    tool_calls: tuple[ToolCall, ...],
+    index: int,
+    data: str,
+) -> str:
+    """Bind opaque state to its exact public assistant message projection."""
+    if (
+        type(binding_key) is not str
+        or not binding_key
+        or (content is not None and type(content) is not str)
+        or type(index) is not int
+        or index < 0
+        or type(data) is not str
+    ):
+        raise ValueError("invalid reasoning binding")
+    try:
+        key = binding_key.encode("utf-8", errors="strict")
+        canonical = json.dumps(
+            {
+                "version": 1,
+                "content": content,
+                "tool_calls": _public_tool_call_projection(tool_calls),
+                "index": index,
+                "data": data,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8", errors="strict")
+    except (TypeError, UnicodeError):
+        raise ValueError("invalid reasoning binding") from None
+    digest = hmac.new(key, canonical, hashlib.sha256).digest()
+    return _REASONING_BINDING_PREFIX + base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def reasoning_binding_is_valid(
+    *,
+    binding_key: str,
+    content: str | None,
+    tool_calls: tuple[ToolCall, ...],
+    index: int,
+    data: str,
+    binding_id: object,
+) -> bool:
+    """Verify a message-scoped binding in constant time."""
+    if type(binding_id) is not str or not binding_id:
+        return False
+    try:
+        expected = create_reasoning_binding_id(
+            binding_key=binding_key,
+            content=content,
+            tool_calls=tool_calls,
+            index=index,
+            data=data,
+        ).encode("ascii")
+        candidate = binding_id.encode("utf-8", errors="strict")
+    except (UnicodeError, ValueError):
+        return False
+    # Rotation of the bridge token intentionally invalidates prior details fail-closed.
+    return hmac.compare_digest(expected, candidate)
 
 
 def _validate_bounded_json_tree(
@@ -139,7 +278,7 @@ def _validate_bounded_json_tree(
     max_depth: int,
     max_nodes: int,
     max_string_bytes: int,
-) -> None:
+) -> int:
     nodes = 0
     stack: list[tuple[object, int]] = [(root, 1)]
     while stack:
@@ -176,6 +315,7 @@ def _validate_bounded_json_tree(
                 raise ChatRequestError("invalid request")
         elif item is not None and type(item) not in (bool, int):
             raise ChatRequestError("invalid request")
+    return nodes
 
 
 def _is_json_scalar(value: object) -> bool:
@@ -318,6 +458,68 @@ def _parse_response_format(
     )
 
 
+def _parse_reasoning_details(
+    value: object,
+    *,
+    binding_key: str,
+    content: str | None,
+    tool_calls: tuple[ToolCall, ...],
+    max_json_depth: int,
+    max_json_nodes: int,
+    max_string_bytes: int,
+    seen_binding_ids: set[str],
+    seen_data_digests: set[bytes],
+) -> tuple[tuple[ReasoningDetail, ...], int]:
+    if type(value) is not list or not value:
+        raise ChatRequestError("invalid request")
+    nodes_used = _validate_bounded_json_tree(
+        value,
+        max_depth=max_json_depth,
+        max_nodes=max_json_nodes,
+        max_string_bytes=max_string_bytes,
+    )
+    details: list[ReasoningDetail] = []
+    for expected_index, raw_detail in enumerate(value):
+        if type(raw_detail) is not dict or set(raw_detail) != {
+            "type",
+            "data",
+            "format",
+            "id",
+            "index",
+        }:
+            raise ChatRequestError("invalid request")
+        data = raw_detail["data"]
+        binding_id = raw_detail["id"]
+        index = raw_detail["index"]
+        data_digest = encrypted_reasoning_data_digest(data, max_string_bytes=max_string_bytes)
+        if (
+            type(raw_detail["type"]) is not str
+            or raw_detail["type"] != "reasoning.encrypted"
+            or type(raw_detail["format"]) is not str
+            or raw_detail["format"] != "openai-responses-v1"
+            or type(binding_id) is not str
+            or not binding_id
+            or type(index) is not int
+            or index != expected_index
+            or data_digest is None
+            or not reasoning_binding_is_valid(
+                binding_key=binding_key,
+                content=content,
+                tool_calls=tool_calls,
+                index=index,
+                data=data,
+                binding_id=binding_id,
+            )
+        ):
+            raise ChatRequestError("invalid request")
+        if binding_id in seen_binding_ids or data_digest in seen_data_digests:
+            raise ChatRequestError("invalid request")
+        seen_binding_ids.add(binding_id)
+        seen_data_digests.add(data_digest)
+        details.append(ReasoningDetail(data=data, binding_id=binding_id, index=index))
+    return tuple(details), nodes_used
+
+
 def parse_chat_completion_request(
     value: object,
     *,
@@ -327,6 +529,7 @@ def parse_chat_completion_request(
     max_json_depth: int,
     max_json_nodes: int,
     max_string_bytes: int,
+    binding_key: str,
 ) -> ChatCompletionRequest:
     """Parse without coercion and reject every unsupported field."""
     if (
@@ -337,6 +540,8 @@ def parse_chat_completion_request(
         or type(max_json_depth) is not int
         or type(max_json_nodes) is not int
         or type(max_string_bytes) is not int
+        or type(binding_key) is not str
+        or not binding_key
         or max_tools <= 0
         or max_json_depth <= 0
         or max_json_nodes <= 0
@@ -367,6 +572,9 @@ def parse_chat_completion_request(
     valid_roles = {"system", "developer", "user", "assistant", "tool"}
     all_call_ids: set[str] = set()
     pending_call_ids: set[str] = set()
+    seen_reasoning_binding_ids: set[str] = set()
+    seen_reasoning_data_digests: set[bytes] = set()
+    remaining_reasoning_nodes = max_json_nodes
     for raw_message in raw_messages:
         if type(raw_message) is not dict or "role" not in raw_message:
             raise ChatRequestError("invalid request")
@@ -392,44 +600,67 @@ def parse_chat_completion_request(
 
         if pending_call_ids:
             raise ChatRequestError("invalid request")
-        if role == "assistant" and "tool_calls" in raw_message:
-            if set(raw_message) != {"role", "content", "tool_calls"}:
+        if role == "assistant":
+            allowed_message_fields = {"role", "content", "tool_calls", "reasoning_details"}
+            if "content" not in raw_message or not set(raw_message) <= allowed_message_fields:
                 raise ChatRequestError("invalid request")
             content = raw_message["content"]
-            raw_calls = raw_message["tool_calls"]
-            if (
-                (content is not None and type(content) is not str)
-                or type(raw_calls) is not list
-                or not 1 <= len(raw_calls) <= max_tools
-            ):
+            if content is not None and type(content) is not str:
                 raise ChatRequestError("invalid request")
             calls: list[ToolCall] = []
-            for raw_call in raw_calls:
-                if type(raw_call) is not dict or set(raw_call) != {"id", "type", "function"}:
+            if "tool_calls" in raw_message:
+                raw_calls = raw_message["tool_calls"]
+                if type(raw_calls) is not list or not 1 <= len(raw_calls) <= max_tools:
                     raise ChatRequestError("invalid request")
-                raw_function = raw_call["function"]
-                if (
-                    type(raw_call["type"]) is not str
-                    or raw_call["type"] != "function"
-                    or type(raw_function) is not dict
-                    or set(raw_function) != {"name", "arguments"}
-                ):
-                    raise ChatRequestError("invalid request")
-                call_id = raw_call["id"]
-                name = raw_function["name"]
-                if (
-                    type(call_id) is not str
-                    or not call_id
-                    or call_id in all_call_ids
-                    or type(name) is not str
-                    or not name
-                ):
-                    raise ChatRequestError("invalid request")
-                arguments = _validate_arguments_object(raw_function["arguments"])
-                all_call_ids.add(call_id)
-                pending_call_ids.add(call_id)
-                calls.append(ToolCall(call_id=call_id, name=name, arguments=arguments))
-            messages.append(ChatMessage(role="assistant", content=content, tool_calls=tuple(calls)))
+                for raw_call in raw_calls:
+                    if type(raw_call) is not dict or set(raw_call) != {"id", "type", "function"}:
+                        raise ChatRequestError("invalid request")
+                    raw_function = raw_call["function"]
+                    if (
+                        type(raw_call["type"]) is not str
+                        or raw_call["type"] != "function"
+                        or type(raw_function) is not dict
+                        or set(raw_function) != {"name", "arguments"}
+                    ):
+                        raise ChatRequestError("invalid request")
+                    call_id = raw_call["id"]
+                    name = raw_function["name"]
+                    if (
+                        type(call_id) is not str
+                        or not call_id
+                        or call_id in all_call_ids
+                        or type(name) is not str
+                        or not name
+                    ):
+                        raise ChatRequestError("invalid request")
+                    arguments = _validate_arguments_object(raw_function["arguments"])
+                    all_call_ids.add(call_id)
+                    pending_call_ids.add(call_id)
+                    calls.append(ToolCall(call_id=call_id, name=name, arguments=arguments))
+            reasoning_details: tuple[ReasoningDetail, ...] = ()
+            if "reasoning_details" in raw_message:
+                reasoning_details, nodes_used = _parse_reasoning_details(
+                    raw_message["reasoning_details"],
+                    binding_key=binding_key,
+                    content=content,
+                    tool_calls=tuple(calls),
+                    max_json_depth=max_json_depth,
+                    max_json_nodes=remaining_reasoning_nodes,
+                    max_string_bytes=max_string_bytes,
+                    seen_binding_ids=seen_reasoning_binding_ids,
+                    seen_data_digests=seen_reasoning_data_digests,
+                )
+                remaining_reasoning_nodes -= nodes_used
+            if content is None and not calls and not reasoning_details:
+                raise ChatRequestError("invalid request")
+            messages.append(
+                ChatMessage(
+                    role="assistant",
+                    content=content,
+                    tool_calls=tuple(calls),
+                    reasoning_details=reasoning_details,
+                )
+            )
             continue
 
         if set(raw_message) != {"role", "content"}:

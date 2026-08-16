@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
+from typing import Any
+
 import pytest
 
 from codex_openai_bridge.translation import (
@@ -14,11 +20,13 @@ from codex_openai_bridge.wire import (
     JsonObjectResponseFormat,
     JsonSchemaResponseFormat,
     NamedFunctionToolChoice,
+    ReasoningDetail,
     ToolCall,
+    parse_chat_completion_request,
 )
 
 
-def test_translation_uses_upstream_model_and_forces_non_persistence_and_non_streaming() -> None:
+def test_translation_forces_encrypted_reasoning_include_and_transport_invariants() -> None:
     request = ChatCompletionRequest(
         messages=(ChatMessage(role="user", content="hello"),),
         max_output_tokens=None,
@@ -29,6 +37,7 @@ def test_translation_uses_upstream_model_and_forces_non_persistence_and_non_stre
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
         "store": False,
         "stream": False,
+        "include": ["reasoning.encrypted_content"],
     }
 
 
@@ -152,6 +161,7 @@ def test_json_object_response_format_maps_to_exact_native_text_format() -> None:
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "return JSON"}]}],
         "store": False,
         "stream": False,
+        "include": ["reasoning.encrypted_content"],
         "text": {"format": {"type": "json_object"}},
     }
 
@@ -231,6 +241,7 @@ def test_optional_json_schema_fields_are_omitted_and_tools_coexist_exactly() -> 
         ],
         "store": False,
         "stream": False,
+        "include": ["reasoning.encrypted_content"],
         "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
         "tool_choice": {"type": "function", "name": "lookup"},
         "parallel_tool_calls": False,
@@ -302,7 +313,73 @@ def test_null_assistant_tool_call_content_does_not_create_empty_message() -> Non
     ]
 
 
-def _completed_response() -> dict[str, object]:
+def test_reasoning_replay_precedes_assistant_text_and_parallel_calls_in_detail_order() -> None:
+    request = ChatCompletionRequest(
+        messages=(
+            ChatMessage(
+                role="assistant",
+                content="Checking both.",
+                tool_calls=(
+                    ToolCall(call_id="call_2", name="second", arguments='{"value":2}'),
+                    ToolCall(call_id="call_1", name="first", arguments='{"value":1}'),
+                ),
+                reasoning_details=(
+                    ReasoningDetail(data="YQ==", binding_id="not-forwarded-1", index=0),
+                    ReasoningDetail(data="Yg==", binding_id="not-forwarded-2", index=1),
+                ),
+            ),
+        ),
+        max_output_tokens=None,
+    )
+
+    payload = chat_request_to_responses(request, upstream_model="upstream-model")
+
+    assert payload["input"] == [
+        {"type": "reasoning", "encrypted_content": "YQ=="},
+        {"type": "reasoning", "encrypted_content": "Yg=="},
+        {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Checking both."}],
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_2",
+            "name": "second",
+            "arguments": '{"value":2}',
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "first",
+            "arguments": '{"value":1}',
+        },
+    ]
+    assert "not-forwarded" not in repr(payload)
+
+
+def test_reasoning_only_null_content_gets_required_following_empty_assistant_message() -> None:
+    request = ChatCompletionRequest(
+        messages=(
+            ChatMessage(
+                role="assistant",
+                content=None,
+                reasoning_details=(
+                    ReasoningDetail(data="YQ==", binding_id="not-forwarded", index=0),
+                ),
+            ),
+        ),
+        max_output_tokens=None,
+    )
+
+    payload = chat_request_to_responses(request, upstream_model="upstream-model")
+
+    assert payload["input"] == [
+        {"type": "reasoning", "encrypted_content": "YQ=="},
+        {"role": "assistant", "content": [{"type": "output_text", "text": ""}]},
+    ]
+
+
+def _completed_response() -> dict[str, Any]:
     return {
         "id": "resp_test",
         "status": "completed",
@@ -321,8 +398,205 @@ def _completed_response() -> dict[str, object]:
     }
 
 
+def _convert(
+    value: object,
+    *,
+    max_json_depth: int = 16,
+    max_json_nodes: int = 128,
+    max_string_bytes: int = 128,
+) -> dict[str, Any]:
+    return responses_to_chat_completion(
+        value,
+        public_model="codex",
+        binding_key="bridge-secret",
+        max_json_depth=max_json_depth,
+        max_json_nodes=max_json_nodes,
+        max_string_bytes=max_string_bytes,
+    )
+
+
+def _expected_binding_id(
+    *, content: str | None, tool_calls: list[dict[str, object]], index: int, data: str
+) -> str:
+    canonical = json.dumps(
+        {
+            "version": 1,
+            "content": content,
+            "tool_calls": tool_calls,
+            "index": index,
+            "data": data,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    digest = hmac.new(b"bridge-secret", canonical, hashlib.sha256).digest()
+    return "cobr_r1_" + base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def test_encrypted_reasoning_maps_to_exact_bound_public_details_and_strips_raw_fields() -> None:
+    response = _completed_response()
+    response["output"] = [
+        {
+            "type": "reasoning",
+            "id": "raw_upstream_id",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": "PRIVATE THOUGHT"}],
+            "encrypted_content": "c2VjcmV0",
+            "sensitive": "PRIVATE RAW FIELD",
+        },
+        {
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "answer"}],
+        },
+    ]
+
+    completion = responses_to_chat_completion(
+        response,
+        public_model="codex",
+        binding_key="bridge-secret",
+        max_json_depth=8,
+        max_json_nodes=32,
+        max_string_bytes=128,
+    )
+
+    detail = completion["choices"][0]["message"]["reasoning_details"][0]
+    assert detail == {
+        "type": "reasoning.encrypted",
+        "data": "c2VjcmV0",
+        "format": "openai-responses-v1",
+        "id": _expected_binding_id(content="answer", tool_calls=[], index=0, data="c2VjcmV0"),
+        "index": 0,
+    }
+    assert "PRIVATE" not in repr(completion)
+    assert "raw_upstream_id" not in repr(completion)
+
+
+@pytest.mark.parametrize("data", ["YQ==", "YQ", "++8=", "++8", "--8=", "--8"])
+def test_encrypted_reasoning_accepts_strict_standard_and_urlsafe_base64(data: str) -> None:
+    response = _completed_response()
+    response["output"].insert(0, {"type": "reasoning", "encrypted_content": data})
+
+    completion = _convert(response)
+
+    assert completion["choices"][0]["message"]["reasoning_details"][0]["data"] == data
+
+
+@pytest.mark.parametrize(
+    "data",
+    ["", "Y Q==", "YQ\n==", "YQ%3D", "+-8=", "/_8=", "YQ=", "YQ===", "A", "===="],
+)
+def test_encrypted_reasoning_rejects_invalid_base64_generically(data: str) -> None:
+    response = _completed_response()
+    response["output"].insert(0, {"type": "reasoning", "encrypted_content": data})
+
+    with pytest.raises(UpstreamResponseError) as caught:
+        _convert(response)
+
+    assert caught.value.args == ("invalid upstream response",)
+    if data:
+        assert data not in repr(caught.value)
+
+
+def test_equivalent_duplicate_upstream_reasoning_blobs_fail_closed() -> None:
+    response = _completed_response()
+    response["output"] = [
+        {"type": "reasoning", "encrypted_content": "++8="},
+        {"type": "reasoning", "encrypted_content": "--8"},
+        response["output"][1],
+    ]
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _convert(response)
+
+
+def test_reasoning_raw_depth_nodes_and_string_use_exact_cumulative_bounds() -> None:
+    response = _completed_response()
+    response["output"] = [
+        {"type": "reasoning", "encrypted_content": "YQ=="},
+        {"type": "reasoning", "encrypted_content": "Yg=="},
+        response["output"][1],
+    ]
+
+    assert (
+        "reasoning_details"
+        in _convert(response, max_json_depth=3, max_json_nodes=13)["choices"][0]["message"]
+    )
+    for limits in (
+        {"max_json_depth": 2, "max_json_nodes": 13},
+        {"max_json_depth": 3, "max_json_nodes": 12},
+    ):
+        with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+            _convert(response, **limits)
+
+    exact = base64.b64encode(b"a" * 15).decode()
+    over = base64.b64encode(b"a" * 38).decode()
+    response["output"] = [
+        {"type": "reasoning", "encrypted_content": exact},
+        response["output"][-1],
+    ]
+    assert "reasoning_details" in _convert(response, max_string_bytes=51)["choices"][0]["message"]
+    response["output"][0]["encrypted_content"] = over
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _convert(response, max_string_bytes=51)
+
+
+def test_public_reasoning_envelope_must_fit_the_same_replay_bounds() -> None:
+    response = _completed_response()
+    response["output"] = [
+        {"type": "reasoning", "encrypted_content": "YQ=="},
+        {"type": "reasoning", "encrypted_content": "Yg=="},
+        response["output"][1],
+    ]
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _convert(response, max_json_nodes=7)
+    completion = _convert(response, max_json_nodes=13)
+    replay = parse_chat_completion_request(
+        {"model": "codex", "messages": [completion["choices"][0]["message"]]},
+        public_model="codex",
+        max_messages=1,
+        max_tools=1,
+        max_json_depth=8,
+        max_json_nodes=13,
+        max_string_bytes=128,
+        binding_key="bridge-secret",
+    )
+    assert len(replay.messages[0].reasoning_details) == 2
+
+    response["output"] = [
+        {"type": "reasoning", "encrypted_content": "YQ=="},
+        response["output"][-1],
+    ]
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _convert(response, max_string_bytes=50)
+    completion = _convert(response, max_json_nodes=7, max_string_bytes=51)
+    replay = parse_chat_completion_request(
+        {"model": "codex", "messages": [completion["choices"][0]["message"]]},
+        public_model="codex",
+        max_messages=1,
+        max_tools=1,
+        max_json_depth=8,
+        max_json_nodes=7,
+        max_string_bytes=51,
+        binding_key="bridge-secret",
+    )
+    assert len(replay.messages[0].reasoning_details) == 1
+
+
+def test_summary_only_reasoning_is_ignored_without_compatibility_key() -> None:
+    completion = _convert(_completed_response())
+
+    assert completion["choices"][0]["message"] == {
+        "role": "assistant",
+        "content": "answer",
+    }
+
+
 def test_completed_assistant_response_maps_to_openai_chat_completion() -> None:
-    assert responses_to_chat_completion(_completed_response(), public_model="codex") == {
+    assert _convert(_completed_response()) == {
         "id": "resp_test",
         "object": "chat.completion",
         "created": 1_723_456_789,
@@ -351,7 +625,7 @@ def test_completed_function_call_maps_to_tool_calls_with_null_content() -> None:
         }
     ]
 
-    completion = responses_to_chat_completion(response, public_model="codex")
+    completion = _convert(response)
 
     choice = completion["choices"][0]
     assert choice == {
@@ -378,6 +652,7 @@ def test_completed_function_call_maps_to_tool_calls_with_null_content() -> None:
 def test_text_and_parallel_function_calls_preserve_text_and_call_order() -> None:
     response = _completed_response()
     response["output"] = [
+        {"type": "reasoning", "encrypted_content": "YQ=="},
         {
             "type": "function_call",
             "status": "completed",
@@ -398,14 +673,39 @@ def test_text_and_parallel_function_calls_preserve_text_and_call_order() -> None
             "name": "first",
             "arguments": '{"value":1}',
         },
+        {"type": "reasoning", "encrypted_content": "Yg=="},
     ]
 
-    completion = responses_to_chat_completion(response, public_model="codex")
+    completion = _convert(response)
 
     message = completion["choices"][0]["message"]
     assert message["content"] == "Checking both."
     assert [call["id"] for call in message["tool_calls"]] == ["call_second", "call_first"]
+    assert [detail["data"] for detail in message["reasoning_details"]] == ["YQ==", "Yg=="]
+    assert [detail["index"] for detail in message["reasoning_details"]] == [0, 1]
     assert completion["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_explicit_null_encrypted_content_is_not_summary_only() -> None:
+    response = _completed_response()
+    response["output"].insert(
+        0,
+        {"type": "reasoning", "status": "in_progress", "encrypted_content": None},
+    )
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _convert(response)
+
+
+def test_encrypted_reasoning_optional_status_must_be_completed() -> None:
+    response = _completed_response()
+    response["output"].insert(
+        0,
+        {"type": "reasoning", "status": "in_progress", "encrypted_content": "YQ=="},
+    )
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _convert(response)
 
 
 @pytest.mark.parametrize(
@@ -473,7 +773,7 @@ def test_rejects_malformed_or_non_allowlisted_function_call_items(
     response["output"] = [call]
 
     with pytest.raises(UpstreamResponseError) as caught:
-        responses_to_chat_completion(response, public_model="codex")
+        _convert(response)
 
     assert caught.value.args == ("invalid upstream response",)
     assert "SENSITIVE_UPSTREAM_FIELD" not in repr(caught.value)
@@ -507,7 +807,7 @@ def test_function_call_arguments_require_one_strict_json_object(arguments: str) 
     ]
 
     with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
-        responses_to_chat_completion(response, public_model="codex")
+        _convert(response)
 
 
 def test_rejects_duplicate_function_call_ids() -> None:
@@ -530,7 +830,7 @@ def test_rejects_duplicate_function_call_ids() -> None:
     ]
 
     with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
-        responses_to_chat_completion(response, public_model="codex")
+        _convert(response)
 
 
 @pytest.mark.parametrize(
@@ -551,7 +851,7 @@ def test_malformed_response_core_is_rejected_generically(mutation: tuple[str, ob
     response[mutation[0]] = mutation[1]
 
     with pytest.raises(UpstreamResponseError) as caught:
-        responses_to_chat_completion(response, public_model="codex")
+        _convert(response)
 
     assert caught.value.args == ("invalid upstream response",)
 
@@ -565,7 +865,7 @@ def test_usage_requires_exact_nonnegative_integers(field: str, value: object) ->
     usage[field] = value
 
     with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
-        responses_to_chat_completion(response, public_model="codex")
+        _convert(response)
 
 
 def test_assistant_message_item_must_be_completed() -> None:
@@ -577,7 +877,7 @@ def test_assistant_message_item_must_be_completed() -> None:
     message["status"] = "in_progress"
 
     with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
-        responses_to_chat_completion(response, public_model="codex")
+        _convert(response)
 
 
 @pytest.mark.parametrize(
@@ -598,7 +898,7 @@ def test_assistant_output_requires_output_text_parts(content: object) -> None:
     message["content"] = content
 
     with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
-        responses_to_chat_completion(response, public_model="codex")
+        _convert(response)
 
 
 @pytest.mark.parametrize(
@@ -617,4 +917,4 @@ def test_rejects_malformed_or_unsupported_output_items(unsupported_item: object)
     output.insert(0, unsupported_item)
 
     with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
-        responses_to_chat_completion(response, public_model="codex")
+        _convert(response)

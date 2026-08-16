@@ -12,8 +12,11 @@ from codex_openai_bridge.wire import (
     JsonObjectResponseFormat,
     JsonSchemaResponseFormat,
     NamedFunctionToolChoice,
+    ReasoningDetail,
     ToolCall,
+    create_reasoning_binding_id,
     parse_chat_completion_request,
+    reasoning_binding_is_valid,
 )
 
 
@@ -26,6 +29,7 @@ def _parse(value: object) -> ChatCompletionRequest:
         max_json_depth=16,
         max_json_nodes=128,
         max_string_bytes=128,
+        binding_key="bridge-secret",
     )
 
 
@@ -56,6 +60,16 @@ def test_rejects_every_model_other_than_the_exact_public_alias(model: object) ->
             "model": "codex",
             "messages": [{"role": "user", "content": "text"}],
             "temperature": 0,
+        },
+        {
+            "model": "codex",
+            "messages": [{"role": "user", "content": "text"}],
+            "include": ["reasoning.encrypted_content"],
+        },
+        {
+            "model": "codex",
+            "messages": [{"role": "user", "content": "text"}],
+            "reasoning": {"effort": "high"},
         },
     ],
 )
@@ -105,6 +119,7 @@ def test_rejects_malformed_messages_and_configured_count_overflow(messages: obje
             max_json_depth=16,
             max_json_nodes=128,
             max_string_bytes=128,
+            binding_key="bridge-secret",
         )
 
 
@@ -120,7 +135,6 @@ def test_maps_one_supported_token_limit(field: str) -> None:
             field: 17,
         }
     )
-
     assert request.max_output_tokens == 17
 
 
@@ -244,6 +258,7 @@ def test_parses_closed_json_schema_response_format_and_owns_schema() -> None:
         max_json_depth=16,
         max_json_nodes=128,
         max_string_bytes=128,
+        binding_key="bridge-secret",
     )
 
     assert request.response_format == JsonSchemaResponseFormat(
@@ -395,6 +410,7 @@ def _parse_schema_with_bounds(
         max_json_depth=max_json_depth,
         max_json_nodes=max_json_nodes,
         max_string_bytes=max_string_bytes,
+        binding_key="bridge-secret",
     )
 
 
@@ -505,6 +521,7 @@ def test_parser_requires_exact_positive_schema_limits(limits: dict[str, object])
             public_model="codex",
             max_messages=1,
             max_tools=1,
+            binding_key="bridge-secret",
             **limits,  # type: ignore[arg-type]
         )
 
@@ -608,6 +625,7 @@ def test_rejects_malformed_duplicate_or_over_limit_function_definitions(tools: o
             max_json_depth=16,
             max_json_nodes=128,
             max_string_bytes=128,
+            binding_key="bridge-secret",
         )
 
 
@@ -703,6 +721,353 @@ def _history_call(call_id: str, name: str = "lookup", arguments: str = "{}") -> 
         "type": "function",
         "function": {"name": name, "arguments": arguments},
     }
+
+
+def _reasoning_detail(
+    *,
+    content: str | None,
+    data: str = "c2VjcmV0",
+    calls: tuple[ToolCall, ...] = (),
+    index: int = 0,
+) -> dict[str, object]:
+    return {
+        "type": "reasoning.encrypted",
+        "data": data,
+        "format": "openai-responses-v1",
+        "id": create_reasoning_binding_id(
+            binding_key="bridge-secret",
+            content=content,
+            tool_calls=calls,
+            index=index,
+            data=data,
+        ),
+        "index": index,
+    }
+
+
+def test_reasoning_binding_directly_covers_content_calls_index_and_data() -> None:
+    calls = (ToolCall(call_id="call_1", name="lookup", arguments="{}"),)
+    binding_id = create_reasoning_binding_id(
+        binding_key="bridge-secret",
+        content="visible",
+        tool_calls=calls,
+        index=0,
+        data="c2VjcmV0",
+    )
+
+    assert reasoning_binding_is_valid(
+        binding_key="bridge-secret",
+        content="visible",
+        tool_calls=calls,
+        index=0,
+        data="c2VjcmV0",
+        binding_id=binding_id,
+    )
+    for changed in (
+        {"binding_key": "rotated-secret"},
+        {"content": "changed"},
+        {"tool_calls": ()},
+        {"index": 1},
+        {"data": "Y2hhbmdlZA=="},
+    ):
+        values = {
+            "binding_key": "bridge-secret",
+            "content": "visible",
+            "tool_calls": calls,
+            "index": 0,
+            "data": "c2VjcmV0",
+            "binding_id": binding_id,
+            **changed,
+        }
+        assert not reasoning_binding_is_valid(**values)  # type: ignore[arg-type]
+
+
+def test_parses_exact_bound_reasoning_details_on_assistant_only() -> None:
+    detail = _reasoning_detail(content="visible")
+
+    request = _parse(
+        {
+            "model": "codex",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "visible",
+                    "reasoning_details": [detail],
+                }
+            ],
+        }
+    )
+    assert request.messages == (
+        ChatMessage(
+            role="assistant",
+            content="visible",
+            reasoning_details=(
+                ReasoningDetail(data="c2VjcmV0", binding_id=detail["id"], index=0),  # type: ignore[arg-type]
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize("data", ["YQ==", "YQ", "++8=", "--8"])
+def test_assistant_reasoning_accepts_strict_base64_variants(data: str) -> None:
+    detail = _reasoning_detail(content="visible", data=data)
+
+    request = _parse(
+        {
+            "model": "codex",
+            "messages": [
+                {"role": "assistant", "content": "visible", "reasoning_details": [detail]}
+            ],
+        }
+    )
+
+    assert request.messages[0].reasoning_details[0].data == data
+
+
+def test_reasoning_details_accept_exact_depth_nodes_and_string_then_reject_one_over() -> None:
+    exact_data = "YQ" * 26
+    detail = _reasoning_detail(content="visible", data=exact_data)
+    document = {
+        "model": "codex",
+        "messages": [{"role": "assistant", "content": "visible", "reasoning_details": [detail]}],
+    }
+
+    parsed = parse_chat_completion_request(
+        document,
+        public_model="codex",
+        max_messages=1,
+        max_tools=1,
+        max_json_depth=3,
+        max_json_nodes=7,
+        max_string_bytes=52,
+        binding_key="bridge-secret",
+    )
+    assert parsed.messages[0].reasoning_details[0].data == exact_data
+
+    for changed_limit in (
+        {"max_json_depth": 2, "max_json_nodes": 7, "max_string_bytes": 52},
+        {"max_json_depth": 3, "max_json_nodes": 6, "max_string_bytes": 52},
+        {"max_json_depth": 3, "max_json_nodes": 7, "max_string_bytes": 51},
+    ):
+        with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+            parse_chat_completion_request(
+                document,
+                public_model="codex",
+                max_messages=1,
+                max_tools=1,
+                binding_key="bridge-secret",
+                **changed_limit,
+            )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"reasoning_details": []},
+        {"reasoning_details": None},
+        {"reasoning_details": [None]},
+        {"reasoning_details": [{**_reasoning_detail(content="visible"), "extra": True}]},
+        {
+            "reasoning_details": [
+                {
+                    key: value
+                    for key, value in _reasoning_detail(content="visible").items()
+                    if key != "id"
+                }
+            ]
+        },
+        {
+            "reasoning_details": [
+                {**_reasoning_detail(content="visible"), "type": "reasoning.summary"}
+            ]
+        },
+        {"reasoning_details": [{**_reasoning_detail(content="visible"), "format": "other"}]},
+        {"reasoning_details": [{**_reasoning_detail(content="visible"), "data": "bad data"}]},
+        {"reasoning_details": [_reasoning_detail(content="visible", data="AB")]},
+        {"reasoning_details": [{**_reasoning_detail(content="visible"), "id": ""}]},
+        {"reasoning_details": [{**_reasoning_detail(content="visible"), "index": True}]},
+        {"reasoning_details": [{**_reasoning_detail(content="visible"), "index": 1}]},
+    ],
+)
+def test_rejects_malformed_reasoning_details_generically(
+    mutation: dict[str, object],
+) -> None:
+    message = {"role": "assistant", "content": "visible", **mutation}
+
+    with pytest.raises(ChatRequestError) as caught:
+        _parse({"model": "codex", "messages": [message]})
+
+    assert caught.value.args == ("invalid request",)
+    assert "bridge-secret" not in repr(caught.value)
+
+
+def test_rejects_reasoning_details_on_every_nonassistant_role() -> None:
+    detail = _reasoning_detail(content="visible")
+    messages_to_test: tuple[dict[str, object], ...] = (
+        {"role": "user", "content": "visible", "reasoning_details": [detail]},
+        {"role": "system", "content": "visible", "reasoning_details": [detail]},
+        {"role": "developer", "content": "visible", "reasoning_details": [detail]},
+        {
+            "role": "tool",
+            "content": "visible",
+            "tool_call_id": "call_1",
+            "reasoning_details": [detail],
+        },
+    )
+    for message in messages_to_test:
+        messages: list[dict[str, object]] = [message]
+        if message["role"] == "tool":
+            messages.insert(
+                0,
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [_history_call("call_1")],
+                },
+            )
+        with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+            _parse({"model": "codex", "messages": messages})
+
+
+def test_binding_rejects_changed_content_or_tool_call_projection() -> None:
+    detail = _reasoning_detail(content="original")
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse(
+            {
+                "model": "codex",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "changed",
+                        "reasoning_details": [detail],
+                    }
+                ],
+            }
+        )
+
+    original_calls = (ToolCall(call_id="call_1", name="original", arguments="{}"),)
+    call_detail = _reasoning_detail(content=None, calls=original_calls)
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse(
+            {
+                "model": "codex",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [_history_call("call_1", name="changed")],
+                        "reasoning_details": [call_detail],
+                    },
+                    {"role": "tool", "tool_call_id": "call_1", "content": "done"},
+                ],
+            }
+        )
+
+
+def test_rejects_duplicate_blob_with_recomputed_binding_across_messages_and_within_list() -> None:
+    first = _reasoning_detail(content="first")
+    second = _reasoning_detail(content="second")
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse(
+            {
+                "model": "codex",
+                "messages": [
+                    {"role": "assistant", "content": "first", "reasoning_details": [first]},
+                    {"role": "user", "content": "continue"},
+                    {"role": "assistant", "content": "second", "reasoning_details": [second]},
+                ],
+            }
+        )
+
+
+def test_rejects_same_decoded_blob_with_different_base64_spelling_across_messages() -> None:
+    standard = _reasoning_detail(content="first", data="++8=")
+    urlsafe_unpadded = _reasoning_detail(content="second", data="--8")
+
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse(
+            {
+                "model": "codex",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "first",
+                        "reasoning_details": [standard],
+                    },
+                    {"role": "user", "content": "continue"},
+                    {
+                        "role": "assistant",
+                        "content": "second",
+                        "reasoning_details": [urlsafe_unpadded],
+                    },
+                ],
+            }
+        )
+
+    duplicate = _reasoning_detail(content="same", index=1)
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse(
+            {
+                "model": "codex",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "same",
+                        "reasoning_details": [
+                            _reasoning_detail(content="same", index=0),
+                            duplicate,
+                        ],
+                    }
+                ],
+            }
+        )
+
+
+def test_reasoning_detail_node_budget_is_cumulative_across_assistant_messages() -> None:
+    first = _reasoning_detail(content="first", data="c2VjcmV0MQ==")
+    second = _reasoning_detail(content="second", data="c2VjcmV0Mg==")
+
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        parse_chat_completion_request(
+            {
+                "model": "codex",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "first",
+                        "reasoning_details": [first],
+                    },
+                    {"role": "user", "content": "continue"},
+                    {
+                        "role": "assistant",
+                        "content": "second",
+                        "reasoning_details": [second],
+                    },
+                ],
+            },
+            public_model="codex",
+            max_messages=3,
+            max_tools=1,
+            max_json_depth=3,
+            max_json_nodes=13,
+            max_string_bytes=128,
+            binding_key="bridge-secret",
+        )
+
+
+@pytest.mark.parametrize("binding_key", ["", None, True])
+def test_parser_requires_exact_nonempty_reasoning_binding_key(binding_key: object) -> None:
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        parse_chat_completion_request(
+            {"model": "codex", "messages": [{"role": "user", "content": "x"}]},
+            public_model="codex",
+            max_messages=1,
+            max_tools=1,
+            max_json_depth=3,
+            max_json_nodes=7,
+            max_string_bytes=52,
+            binding_key=binding_key,  # type: ignore[arg-type]
+        )
 
 
 def test_parses_parallel_tool_history_with_results_in_either_order() -> None:

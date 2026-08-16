@@ -12,12 +12,14 @@ from typing import Any, cast
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from openai.types.chat import ChatCompletion
 
 import codex_openai_bridge.app as app_module
 from codex_openai_bridge.app import create_app
 from codex_openai_bridge.auth import Credential, CredentialUnavailable
 from codex_openai_bridge.config import Settings
 from codex_openai_bridge.upstream import UpstreamError, UpstreamErrorKind
+from codex_openai_bridge.wire import ToolCall, create_reasoning_binding_id
 
 TOKEN = "a" * 43
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -231,6 +233,7 @@ async def test_authenticated_text_chat_completion_tracer_bullet(tmp_path: Path) 
                 ],
                 "store": False,
                 "stream": False,
+                "include": ["reasoning.encrypted_content"],
             },
         )
     ]
@@ -331,6 +334,7 @@ async def test_structured_output_reaches_injected_upstream_exactly(
                 ],
                 "store": False,
                 "stream": False,
+                "include": ["reasoning.encrypted_content"],
                 "text": expected_text,
             },
         )
@@ -522,6 +526,7 @@ async def test_two_request_function_tool_round_trip_uses_injected_upstream_only(
             ],
             "store": False,
             "stream": False,
+            "include": ["reasoning.encrypted_content"],
             "tools": [
                 {
                     "type": "function",
@@ -553,6 +558,241 @@ async def test_two_request_function_tool_round_trip_uses_injected_upstream_only(
             "output": '{"condition":"sunny"}',
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_two_call_encrypted_reasoning_round_trip_survives_sdk_and_replays_in_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    credential = _credential()
+    manager = StaticCredentialManager(credential)
+    upstream = SequenceFakeUpstream(
+        [
+            {
+                "id": "resp_reasoning",
+                "status": "completed",
+                "created_at": 1_723_456_789,
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "id": "raw-secret-id",
+                        "status": "completed",
+                        "summary": [{"type": "summary_text", "text": "PRIVATE SUMMARY"}],
+                        "encrypted_content": "YQ==",
+                    },
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "First answer"}],
+                    },
+                ],
+                "usage": {"input_tokens": 2, "output_tokens": 2, "total_tokens": 4},
+            },
+            {
+                "id": "resp_final",
+                "status": "completed",
+                "created_at": 1_723_456_790,
+                "output": [
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Second answer"}],
+                    }
+                ],
+                "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+            },
+        ]
+    )
+    app = create_app(settings, manager, upstream=upstream)
+    documents: list[dict[str, object]] = [
+        {"model": "codex", "messages": [{"role": "user", "content": "first"}]}
+    ]
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return documents.pop(0)
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    request = cast(Any, SimpleNamespace(app=app))
+    first_response = await app_module._chat_completions(request)
+    assert isinstance(first_response.body, (bytes, bytearray))
+    first_body = json.loads(first_response.body)
+    sdk_message = ChatCompletion.model_validate(first_body).choices[0].message.model_dump()
+    detail = sdk_message["reasoning_details"][0]
+    assert detail == {
+        "type": "reasoning.encrypted",
+        "data": "YQ==",
+        "format": "openai-responses-v1",
+        "id": detail["id"],
+        "index": 0,
+    }
+    assert detail["id"].startswith("cobr_r1_")
+    assert "PRIVATE" not in repr(first_body)
+    assert "raw-secret-id" not in repr(first_body)
+
+    # This is the exact assistant subset current Honcho places back into history.
+    honcho_assistant = {
+        "role": "assistant",
+        "content": sdk_message["content"],
+        "reasoning_details": sdk_message["reasoning_details"],
+    }
+    documents.append(
+        {
+            "model": "codex",
+            "messages": [
+                {"role": "user", "content": "first"},
+                honcho_assistant,
+                {"role": "user", "content": "continue"},
+            ],
+        }
+    )
+    second_response = await app_module._chat_completions(request)
+
+    assert second_response.status == 200
+    assert manager.calls == [False, False]
+    assert upstream.calls[1][1]["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+        {"type": "reasoning", "encrypted_content": "YQ=="},
+        {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "First answer"}],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_move_tool_tamper_and_cross_message_duplicate_fail_before_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    app = create_app(settings, NeverCredentialManager(), upstream=FakeUpstream({}))
+
+    def detail_for(content: str | None, calls: tuple[ToolCall, ...] = ()) -> dict[str, object]:
+        data = "YQ=="
+        return {
+            "type": "reasoning.encrypted",
+            "data": data,
+            "format": "openai-responses-v1",
+            "id": create_reasoning_binding_id(
+                binding_key=TOKEN,
+                content=content,
+                tool_calls=calls,
+                index=0,
+                data=data,
+            ),
+            "index": 0,
+        }
+
+    original = detail_for("original")
+    original_calls = (ToolCall(call_id="call_1", name="original", arguments="{}"),)
+    call_detail = detail_for(None, original_calls)
+    documents: list[dict[str, object]] = [
+        {
+            "model": "codex",
+            "messages": [
+                {"role": "assistant", "content": "moved", "reasoning_details": [original]}
+            ],
+        },
+        {
+            "model": "codex",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_details": [call_detail],
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "changed", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "done"},
+            ],
+        },
+        {
+            "model": "codex",
+            "messages": [
+                {"role": "assistant", "content": "original", "reasoning_details": [original]},
+                {"role": "user", "content": "continue"},
+                {"role": "assistant", "content": "original", "reasoning_details": [original]},
+            ],
+        },
+    ]
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return documents.pop(0)
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    request = cast(Any, SimpleNamespace(app=app))
+    for _ in range(3):
+        response = await app_module._chat_completions(request)
+        assert isinstance(response.body, (bytes, bytearray))
+        assert response.status == 400
+        assert json.loads(response.body)["error"]["message"] == "Request is invalid"
+        assert TOKEN not in response.body.decode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["bad_base64", "oversized", "deep", "explicit_null", "duplicate_blob"]
+)
+async def test_bad_or_overbound_upstream_reasoning_is_sanitized_502(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    settings = replace(_settings(tmp_path), max_json_depth=4, max_string_bytes=64)
+    reasoning: dict[str, object] = {"type": "reasoning", "encrypted_content": "YQ=="}
+    additional_reasoning: list[dict[str, object]] = []
+    if case == "bad_base64":
+        reasoning["encrypted_content"] = "SENSITIVE BAD BLOB"
+    elif case == "oversized":
+        reasoning["encrypted_content"] = "Y" * 65
+    elif case == "deep":
+        reasoning["unknown"] = {"nested": {"too": "deep"}}
+    elif case == "explicit_null":
+        reasoning["encrypted_content"] = None
+    else:
+        reasoning["encrypted_content"] = "++8="
+        additional_reasoning.append({"type": "reasoning", "encrypted_content": "--8"})
+    upstream = FakeUpstream(
+        {
+            "id": "resp_bad",
+            "status": "completed",
+            "created_at": 1,
+            "output": [
+                reasoning,
+                *additional_reasoning,
+                {
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "answer"}],
+                },
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }
+    )
+    app = create_app(settings, StaticCredentialManager(_credential()), upstream=upstream)
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return {"model": "codex", "messages": [{"role": "user", "content": "x"}]}
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    response = await app_module._chat_completions(cast(Any, SimpleNamespace(app=app)))
+    assert isinstance(response.body, (bytes, bytearray))
+
+    assert response.status == 502
+    assert json.loads(response.body)["error"]["message"] == "Upstream service unavailable"
+    assert "SENSITIVE" not in response.body.decode()
+    assert TOKEN not in response.body.decode()
 
 
 @pytest.mark.asyncio

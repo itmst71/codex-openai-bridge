@@ -21,6 +21,7 @@ from codex_openai_bridge.json_boundary import (
 )
 from codex_openai_bridge.security import bearer_is_authorized, load_bridge_token
 from codex_openai_bridge.translation import (
+    UpstreamResponseError,
     chat_request_to_responses,
     responses_to_chat_completion,
 )
@@ -231,6 +232,7 @@ async def _chat_completions(request: web.Request) -> web.Response:
             max_json_depth=settings.max_json_depth,
             max_json_nodes=settings.max_json_nodes,
             max_string_bytes=settings.max_string_bytes,
+            binding_key=request.app[_TOKEN_KEY],
         )
         payload = chat_request_to_responses(chat_request, upstream_model=settings.upstream_model)
     except ChatRequestError:
@@ -245,9 +247,15 @@ async def _chat_completions(request: web.Request) -> web.Response:
         completion = responses_to_chat_completion(
             upstream_response,
             public_model=settings.public_model,
+            binding_key=request.app[_TOKEN_KEY],
+            max_json_depth=settings.max_json_depth,
+            max_json_nodes=settings.max_json_nodes,
+            max_string_bytes=settings.max_string_bytes,
         )
     except UpstreamError as error:
         return _upstream_error_response(error)
+    except UpstreamResponseError:
+        return _service_error_response()
     except Exception:
         return _service_error_response()
     return web.json_response(completion)
