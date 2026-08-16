@@ -24,7 +24,12 @@ from codex_openai_bridge.translation import (
     chat_request_to_responses,
     responses_to_chat_completion,
 )
-from codex_openai_bridge.upstream import HttpxResponsesUpstream, ResponsesUpstream
+from codex_openai_bridge.upstream import (
+    HttpxResponsesUpstream,
+    ResponsesUpstream,
+    UpstreamError,
+    UpstreamErrorKind,
+)
 from codex_openai_bridge.wire import ChatRequestError, parse_chat_completion_request
 
 
@@ -174,6 +179,37 @@ def _service_error_response() -> web.Response:
     )
 
 
+def _credentials_error_response() -> web.Response:
+    return openai_error_response(
+        status=503,
+        message="Upstream credentials unavailable",
+        error_type="server_error",
+        code="credentials_unavailable",
+    )
+
+
+def _upstream_error_response(error: UpstreamError) -> web.Response:
+    if error.kind is UpstreamErrorKind.CREDENTIALS:
+        return _credentials_error_response()
+    if error.kind is UpstreamErrorKind.TIMEOUT:
+        return openai_error_response(
+            status=504,
+            message="Upstream request timed out",
+            error_type="server_error",
+            code="upstream_timeout",
+        )
+    if error.kind is UpstreamErrorKind.RATE_LIMIT:
+        headers = {"Retry-After": error.retry_after} if error.retry_after is not None else None
+        return openai_error_response(
+            status=429,
+            message="Upstream rate limit exceeded",
+            error_type="rate_limit_error",
+            code="rate_limit_exceeded",
+            headers=headers,
+        )
+    return _service_error_response()
+
+
 async def _chat_completions(request: web.Request) -> web.Response:
     settings = request.app[_SETTINGS_KEY]
     try:
@@ -198,11 +234,16 @@ async def _chat_completions(request: web.Request) -> web.Response:
 
     try:
         credential = await request.app[_CREDENTIAL_PROVIDER_KEY].get_credentials()
+    except Exception:
+        return _credentials_error_response()
+    try:
         upstream_response = await request.app[_UPSTREAM_KEY].create_response(credential, payload)
         completion = responses_to_chat_completion(
             upstream_response,
             public_model=settings.public_model,
         )
+    except UpstreamError as error:
+        return _upstream_error_response(error)
     except Exception:
         return _service_error_response()
     return web.json_response(completion)
@@ -223,7 +264,14 @@ def create_app(
     app[_CREDENTIAL_PROVIDER_KEY] = credential_provider
     app[_SETTINGS_KEY] = settings
     if upstream is None:
-        owned_upstream = HttpxResponsesUpstream(settings)
+
+        async def refresh_credentials() -> Credential:
+            return await credential_provider.get_credentials(force_refresh=True)
+
+        owned_upstream = HttpxResponsesUpstream(
+            settings,
+            credential_refresher=refresh_credentials,
+        )
         app[_UPSTREAM_KEY] = owned_upstream
 
         async def close_owned_upstream(_app: web.Application) -> None:

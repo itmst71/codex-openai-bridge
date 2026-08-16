@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -15,6 +16,7 @@ import codex_openai_bridge.app as app_module
 from codex_openai_bridge.app import create_app
 from codex_openai_bridge.auth import Credential, CredentialUnavailable
 from codex_openai_bridge.config import Settings
+from codex_openai_bridge.upstream import UpstreamError, UpstreamErrorKind
 
 TOKEN = "a" * 43
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -81,6 +83,19 @@ class CloseTrackingUpstream(FakeUpstream):
         self.close_calls += 1
 
 
+class CategorizedFailingUpstream:
+    def __init__(self, error: UpstreamError) -> None:
+        self.error = error
+
+    async def create_response(
+        self,
+        credential: Credential,
+        payload: dict[str, Any],
+    ) -> object:
+        del credential, payload
+        raise self.error
+
+
 def _credential(
     *,
     access_token: str = "upstream-token",
@@ -101,6 +116,57 @@ def _settings(tmp_path: Path) -> Settings:
     token_file.write_text(TOKEN + "\n", encoding="ascii")
     token_file.chmod(0o600)
     return replace(Settings.from_env(), client_token_file=token_file)
+
+
+@pytest.mark.parametrize(
+    "error,status,code,retry_after",
+    [
+        (UpstreamError(UpstreamErrorKind.SERVICE), 502, "upstream_error", None),
+        (UpstreamError(UpstreamErrorKind.TIMEOUT), 504, "upstream_timeout", None),
+        (
+            UpstreamError(UpstreamErrorKind.CREDENTIALS),
+            503,
+            "credentials_unavailable",
+            None,
+        ),
+        (
+            UpstreamError(UpstreamErrorKind.RATE_LIMIT, retry_after="120"),
+            429,
+            "rate_limit_exceeded",
+            "120",
+        ),
+        (
+            UpstreamError(UpstreamErrorKind.RATE_LIMIT),
+            429,
+            "rate_limit_exceeded",
+            None,
+        ),
+        (
+            UpstreamError(
+                UpstreamErrorKind.RATE_LIMIT,
+                retry_after="999999999999999999999999",
+            ),
+            429,
+            "rate_limit_exceeded",
+            None,
+        ),
+    ],
+)
+def test_upstream_error_mapping_is_openai_shaped_and_bounded(
+    error: UpstreamError,
+    status: int,
+    code: str,
+    retry_after: str | None,
+) -> None:
+    response = app_module._upstream_error_response(error)
+    assert isinstance(response.body, (bytes, bytearray))
+    body = json.loads(response.body)
+
+    assert response.status == status
+    assert body["error"]["code"] == code
+    assert body["error"]["param"] is None
+    assert response.headers.get("Retry-After") == retry_after
+    assert "upstream request failed" not in repr(body)
 
 
 @pytest.mark.asyncio
@@ -216,6 +282,81 @@ async def test_upstream_exception_becomes_sanitized_service_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error,status,code,retry_after",
+    [
+        (UpstreamError(UpstreamErrorKind.SERVICE), 502, "upstream_error", None),
+        (UpstreamError(UpstreamErrorKind.TIMEOUT), 504, "upstream_timeout", None),
+        (
+            UpstreamError(UpstreamErrorKind.CREDENTIALS),
+            503,
+            "credentials_unavailable",
+            None,
+        ),
+        (
+            UpstreamError(UpstreamErrorKind.RATE_LIMIT, retry_after="9"),
+            429,
+            "rate_limit_exceeded",
+            "9",
+        ),
+    ],
+)
+async def test_categorized_upstream_error_preserves_request_id(
+    tmp_path: Path,
+    error: UpstreamError,
+    status: int,
+    code: str,
+    retry_after: str | None,
+) -> None:
+    manager = StaticCredentialManager(_credential())
+    app = create_app(
+        _settings(tmp_path),
+        manager,
+        upstream=CategorizedFailingUpstream(error),
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "codex", "messages": [{"role": "user", "content": "text"}]},
+            headers=AUTH,
+        )
+        body = await response.json()
+
+    assert response.status == status
+    assert body["error"]["code"] == code
+    assert re.fullmatch(r"[0-9a-f]{32}", response.headers["X-Request-ID"])
+    assert response.headers.get("Retry-After") == retry_after
+    assert manager.calls == [False]
+
+
+@pytest.mark.asyncio
+async def test_chat_credential_resolver_failure_is_sanitized_503(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = create_app(
+        _settings(tmp_path),
+        UnexpectedFailingCredentialManager(),
+        upstream=FakeUpstream({}),
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "codex", "messages": [{"role": "user", "content": "text"}]},
+            headers=AUTH,
+        )
+        body = await response.json()
+
+    assert response.status == 503
+    assert body["error"]["code"] == "credentials_unavailable"
+    assert re.fullmatch(r"[0-9a-f]{32}", response.headers["X-Request-ID"])
+    assert "SENSITIVE_UNEXPECTED_DETAIL" not in repr(body)
+    assert "SENSITIVE_UNEXPECTED_DETAIL" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_malformed_upstream_response_becomes_sanitized_service_error(tmp_path: Path) -> None:
     manager = StaticCredentialManager(_credential())
     app = create_app(
@@ -255,13 +396,48 @@ async def test_application_closes_its_owned_upstream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     upstream = CloseTrackingUpstream()
-    monkeypatch.setattr(app_module, "HttpxResponsesUpstream", lambda _settings: upstream)
+    monkeypatch.setattr(
+        app_module,
+        "HttpxResponsesUpstream",
+        lambda _settings, **_kwargs: upstream,
+    )
     app = create_app(_settings(tmp_path), NeverCredentialManager())
     app.freeze()
 
     await app.startup()
     await app.cleanup()
 
+    assert upstream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_owned_upstream_receives_narrow_forced_credential_refresher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential = _credential(access_token="refreshed-token")
+    manager = StaticCredentialManager(credential)
+    upstream = CloseTrackingUpstream()
+    captured: dict[str, Any] = {}
+
+    def factory(
+        _settings: Settings,
+        *,
+        credential_refresher: Any,
+    ) -> CloseTrackingUpstream:
+        captured["credential_refresher"] = credential_refresher
+        return upstream
+
+    monkeypatch.setattr(app_module, "HttpxResponsesUpstream", factory)
+    app = create_app(_settings(tmp_path), manager)
+    app.freeze()
+
+    refreshed = await captured["credential_refresher"]()
+    await app.startup()
+    await app.cleanup()
+
+    assert refreshed is credential
+    assert manager.calls == [True]
     assert upstream.close_calls == 1
 
 
