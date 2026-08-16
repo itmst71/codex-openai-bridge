@@ -20,6 +20,12 @@ from codex_openai_bridge.json_boundary import (
     validate_json_request_headers,
 )
 from codex_openai_bridge.security import bearer_is_authorized, load_bridge_token
+from codex_openai_bridge.translation import (
+    chat_request_to_responses,
+    responses_to_chat_completion,
+)
+from codex_openai_bridge.upstream import HttpxResponsesUpstream, ResponsesUpstream
+from codex_openai_bridge.wire import ChatRequestError, parse_chat_completion_request
 
 
 class CredentialProvider(Protocol):
@@ -31,6 +37,7 @@ class CredentialProvider(Protocol):
 _TOKEN_KEY = web.AppKey("bridge_token", str)
 _CREDENTIAL_PROVIDER_KEY = web.AppKey("credential_provider", CredentialProvider)
 _SETTINGS_KEY = web.AppKey("settings", Settings)
+_UPSTREAM_KEY = web.AppKey("upstream", ResponsesUpstream)
 _CANONICAL_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _READINESS_EXPIRY_SKEW_SECONDS = 60
 _REQUEST_ID_BYTES = 16
@@ -149,10 +156,28 @@ async def _readyz(request: web.Request) -> web.Response:
     return web.json_response({"status": "unavailable"}, status=503)
 
 
-async def _bounded_not_implemented(request: web.Request) -> web.Response:
+def _invalid_request_response() -> web.Response:
+    return openai_error_response(
+        status=400,
+        message="Request is invalid",
+        error_type="invalid_request_error",
+        code="invalid_request",
+    )
+
+
+def _service_error_response() -> web.Response:
+    return openai_error_response(
+        status=502,
+        message="Upstream service unavailable",
+        error_type="server_error",
+        code="upstream_error",
+    )
+
+
+async def _chat_completions(request: web.Request) -> web.Response:
     settings = request.app[_SETTINGS_KEY]
     try:
-        await read_json_request(
+        document = await read_json_request(
             request,
             max_body_bytes=settings.max_request_body_bytes,
             max_depth=settings.max_json_depth,
@@ -161,15 +186,34 @@ async def _bounded_not_implemented(request: web.Request) -> web.Response:
         )
     except JsonBoundaryError as error:
         return _json_boundary_response(error)
-    return openai_error_response(
-        status=501,
-        message="Endpoint is not implemented",
-        error_type="invalid_request_error",
-        code="unsupported_endpoint",
-    )
+    try:
+        chat_request = parse_chat_completion_request(
+            document,
+            public_model=settings.public_model,
+            max_messages=settings.max_messages,
+        )
+        payload = chat_request_to_responses(chat_request, upstream_model=settings.upstream_model)
+    except ChatRequestError:
+        return _invalid_request_response()
+
+    try:
+        credential = await request.app[_CREDENTIAL_PROVIDER_KEY].get_credentials()
+        upstream_response = await request.app[_UPSTREAM_KEY].create_response(credential, payload)
+        completion = responses_to_chat_completion(
+            upstream_response,
+            public_model=settings.public_model,
+        )
+    except Exception:
+        return _service_error_response()
+    return web.json_response(completion)
 
 
-def create_app(settings: Settings, credential_provider: CredentialProvider) -> web.Application:
+def create_app(
+    settings: Settings,
+    credential_provider: CredentialProvider,
+    *,
+    upstream: ResponsesUpstream | None = None,
+) -> web.Application:
     """Create the loopback bridge application with startup-loaded client auth."""
     app = web.Application(
         middlewares=[_request_id_middleware, _client_auth_middleware],
@@ -178,11 +222,21 @@ def create_app(settings: Settings, credential_provider: CredentialProvider) -> w
     app[_TOKEN_KEY] = load_bridge_token(settings.client_token_file)
     app[_CREDENTIAL_PROVIDER_KEY] = credential_provider
     app[_SETTINGS_KEY] = settings
+    if upstream is None:
+        owned_upstream = HttpxResponsesUpstream(settings)
+        app[_UPSTREAM_KEY] = owned_upstream
+
+        async def close_owned_upstream(_app: web.Application) -> None:
+            await owned_upstream.aclose()
+
+        app.on_cleanup.append(close_owned_upstream)
+    else:
+        app[_UPSTREAM_KEY] = upstream
     app.router.add_get("/healthz", _healthz)
     app.router.add_get("/readyz", _readyz)
     app.router.add_post(
         "/v1/chat/completions",
-        _bounded_not_implemented,
+        _chat_completions,
         expect_handler=_protected_expect_handler,
     )
     return app

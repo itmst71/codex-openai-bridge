@@ -6,10 +6,12 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+import codex_openai_bridge.app as app_module
 from codex_openai_bridge.app import create_app
 from codex_openai_bridge.auth import Credential, CredentialUnavailable
 from codex_openai_bridge.config import Settings
@@ -46,6 +48,39 @@ class StaticCredentialManager:
         return self.credential
 
 
+class FakeUpstream:
+    def __init__(self, response: object) -> None:
+        self.response = response
+        self.calls: list[tuple[Credential, dict[str, Any]]] = []
+
+    async def create_response(
+        self,
+        credential: Credential,
+        payload: dict[str, Any],
+    ) -> object:
+        self.calls.append((credential, payload))
+        return self.response
+
+
+class FailingUpstream:
+    async def create_response(
+        self,
+        credential: Credential,
+        payload: dict[str, Any],
+    ) -> object:
+        del credential, payload
+        raise RuntimeError("SENSITIVE_UPSTREAM_DETAIL")
+
+
+class CloseTrackingUpstream(FakeUpstream):
+    def __init__(self) -> None:
+        super().__init__({})
+        self.close_calls = 0
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+
+
 def _credential(
     *,
     access_token: str = "upstream-token",
@@ -66,6 +101,168 @@ def _settings(tmp_path: Path) -> Settings:
     token_file.write_text(TOKEN + "\n", encoding="ascii")
     token_file.chmod(0o600)
     return replace(Settings.from_env(), client_token_file=token_file)
+
+
+@pytest.mark.asyncio
+async def test_authenticated_text_chat_completion_tracer_bullet(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    credential = _credential()
+    manager = StaticCredentialManager(credential)
+    upstream = FakeUpstream(
+        {
+            "id": "resp_test",
+            "status": "completed",
+            "created_at": 1_723_456_789,
+            "output": [
+                {
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hello back"}],
+                }
+            ],
+            "usage": {"input_tokens": 2, "output_tokens": 2, "total_tokens": 4},
+        }
+    )
+    app = create_app(settings, manager, upstream=upstream)
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "codex", "messages": [{"role": "user", "content": "hello"}]},
+            headers=AUTH,
+        )
+        body = await response.json()
+
+    assert response.status == 200
+    assert body["choices"][0]["message"]["content"] == "hello back"
+    assert manager.calls == [False]
+    assert upstream.calls == [
+        (
+            credential,
+            {
+                "model": settings.upstream_model,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "hello"}],
+                    }
+                ],
+                "store": False,
+                "stream": False,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"model": "other", "messages": [{"role": "user", "content": "text"}]},
+        {
+            "model": "codex",
+            "messages": [{"role": "user", "content": "text"}],
+            "stream": True,
+        },
+    ],
+)
+async def test_invalid_task_6_request_is_sanitized_before_credentials(
+    tmp_path: Path,
+    payload: object,
+) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager(), upstream=FakeUpstream({}))
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json=payload,
+            headers=AUTH,
+        )
+        body = await response.json()
+
+    assert response.status == 400
+    assert body == {
+        "error": {
+            "message": "Request is invalid",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "invalid_request",
+        }
+    }
+    assert "other" not in repr(body)
+
+
+@pytest.mark.asyncio
+async def test_upstream_exception_becomes_sanitized_service_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    manager = StaticCredentialManager(_credential())
+    app = create_app(_settings(tmp_path), manager, upstream=FailingUpstream())
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "codex", "messages": [{"role": "user", "content": "text"}]},
+            headers=AUTH,
+        )
+        body = await response.json()
+
+    assert response.status == 502
+    assert body["error"]["code"] == "upstream_error"
+    assert "SENSITIVE_UPSTREAM_DETAIL" not in repr(body)
+    assert "SENSITIVE_UPSTREAM_DETAIL" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_malformed_upstream_response_becomes_sanitized_service_error(tmp_path: Path) -> None:
+    manager = StaticCredentialManager(_credential())
+    app = create_app(
+        _settings(tmp_path),
+        manager,
+        upstream=FakeUpstream({"status": "completed", "output": "SENSITIVE_BODY_VALUE"}),
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "codex", "messages": [{"role": "user", "content": "text"}]},
+            headers=AUTH,
+        )
+        body = await response.json()
+
+    assert response.status == 502
+    assert body["error"]["code"] == "upstream_error"
+    assert "SENSITIVE_BODY_VALUE" not in repr(body)
+
+
+@pytest.mark.asyncio
+async def test_injected_upstream_is_not_owned_or_closed(tmp_path: Path) -> None:
+    upstream = CloseTrackingUpstream()
+    app = create_app(_settings(tmp_path), NeverCredentialManager(), upstream=upstream)
+    app.freeze()
+
+    await app.startup()
+    await app.cleanup()
+
+    assert upstream.close_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_application_closes_its_owned_upstream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream = CloseTrackingUpstream()
+    monkeypatch.setattr(app_module, "HttpxResponsesUpstream", lambda _settings: upstream)
+    app = create_app(_settings(tmp_path), NeverCredentialManager())
+    app.freeze()
+
+    await app.startup()
+    await app.cleanup()
+
+    assert upstream.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -156,7 +353,7 @@ async def test_expect_100_authorized_request_preserves_continue_flow(tmp_path: P
             await writer.wait_closed()
 
     assert continue_head == b"HTTP/1.1 100 Continue\r\n\r\n"
-    assert final_head.startswith(b"HTTP/1.1 501 ")
+    assert final_head.startswith(b"HTTP/1.1 400 ")
     assert re.search(rb"\r\nX-Request-ID: [0-9a-f]{32}\r\n", final_head, re.IGNORECASE)
 
 
@@ -313,7 +510,7 @@ async def test_truncated_content_length_never_reaches_application_handler(tmp_pa
             writer.close()
             await writer.wait_closed()
 
-    assert not response_head.startswith(b"HTTP/1.1 501 ")
+    assert not response_head.startswith(b"HTTP/1.1 200 ")
 
 
 @pytest.mark.asyncio
@@ -333,8 +530,10 @@ async def test_supported_json_content_type_is_accepted(
             data=b"{}",
             headers={**AUTH, "Content-Type": content_type},
         )
+        body = await response.json()
 
-    assert response.status == 501
+    assert response.status == 400
+    assert body["error"]["code"] == "invalid_request"
 
 
 @pytest.mark.asyncio
@@ -395,8 +594,10 @@ async def test_authenticated_body_exact_limit_is_accepted(tmp_path: Path) -> Non
             data=payload,
             headers={**AUTH, "Content-Type": "application/json"},
         )
+        body = await response.json()
 
-    assert response.status == 501
+    assert response.status == 400
+    assert body["error"]["code"] == "invalid_request"
 
 
 @pytest.mark.asyncio
@@ -475,8 +676,10 @@ async def test_valid_bearer_reaches_protected_handler(tmp_path: Path) -> None:
             data=b"{}",
             headers={**AUTH, "Content-Type": "application/json"},
         )
+        body = await response.json()
 
-    assert response.status == 501
+    assert response.status == 400
+    assert body["error"]["code"] == "invalid_request"
 
 
 @pytest.mark.asyncio
