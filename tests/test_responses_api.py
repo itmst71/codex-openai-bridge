@@ -143,7 +143,12 @@ async def test_authenticated_nonstream_string_response_is_reconstructed_and_sdk_
             credential,
             {
                 "model": settings.upstream_model,
-                "input": "hello",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "hello"}],
+                    }
+                ],
                 "store": False,
                 "stream": False,
                 "include": ["reasoning.encrypted_content"],
@@ -261,8 +266,9 @@ def _parse_request(
 
 def test_request_options_reuse_closed_chat_contracts_and_reconstruct_exact_policy() -> None:
     schema = {
+        "title": "AnswerResult",
         "type": "object",
-        "properties": {"answer": {"type": "string"}},
+        "properties": {"answer": {"title": "Answer", "type": "string"}},
         "required": ["answer"],
         "additionalProperties": False,
     }
@@ -292,7 +298,7 @@ def test_request_options_reuse_closed_chat_contracts_and_reconstruct_exact_polic
         "text": {
             "format": {
                 "type": "json_schema",
-                "name": "answer",
+                "name": "Answer",
                 "schema": schema,
                 "strict": True,
             }
@@ -311,7 +317,6 @@ def test_request_options_reuse_closed_chat_contracts_and_reconstruct_exact_polic
         "store": False,
         "stream": False,
         "include": ["reasoning.encrypted_content"],
-        "max_output_tokens": 42,
         "tools": [
             {
                 "type": "function",
@@ -1181,7 +1186,12 @@ async def test_real_upstream_retries_exactly_one_401_for_responses_payload(
         == json.loads(requests[1].content)
         == {
             "model": settings.upstream_model,
-            "input": "hello",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                }
+            ],
             "store": False,
             "stream": False,
             "include": ["reasoning.encrypted_content"],

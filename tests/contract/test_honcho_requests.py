@@ -36,7 +36,9 @@ WEATHER_TOOL: dict[str, Any] = {
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("token_field", ["max_tokens", "max_completion_tokens"])
-async def test_honcho_token_limit_aliases(token_field: str, tmp_path: Path) -> None:
+async def test_honcho_token_limit_aliases_are_validated_but_not_forwarded(
+    token_field: str, tmp_path: Path
+) -> None:
     async with contract_server(tmp_path, responses=[completed_text_response()]) as running:
         await running.client.chat.completions.create(
             model=PUBLIC_MODEL,
@@ -44,7 +46,7 @@ async def test_honcho_token_limit_aliases(token_field: str, tmp_path: Path) -> N
             **cast(Any, {token_field: 321}),
         )
 
-    assert running.upstream.calls[0]["max_output_tokens"] == 321
+    assert "max_output_tokens" not in running.upstream.calls[0]
     assert_server_policy(running.upstream.calls[0], stream=False)
 
 
@@ -95,7 +97,7 @@ async def test_honcho_tools_tool_choice_and_parallel_shape(tmp_path: Path) -> No
             },
             {
                 "type": "json_schema",
-                "name": "HonchoAnswer",
+                "name": "honchoanswer",
                 "schema": {
                     "type": "object",
                     "properties": {"answer": {"type": "string"}},

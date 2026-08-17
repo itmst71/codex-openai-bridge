@@ -86,10 +86,16 @@ def _project_item(
         raise _invalid()
     item_type = value.get("type")
     if item_type == "message":
-        if set(value) != {"id", "type", "status", "role", "content"}:
+        required = {"id", "type", "status", "role", "content"}
+        if not required <= set(value) or not set(value) <= required | {"phase"}:
             raise _invalid()
         content = value["content"]
-        if value["status"] != status or value["role"] != "assistant" or type(content) is not list:
+        if (
+            value["status"] != status
+            or value["role"] != "assistant"
+            or type(content) is not list
+            or ("phase" in value and value["phase"] != "final_answer")
+        ):
             raise _invalid()
         parts: list[dict[str, Any]] = []
         for part in content:
@@ -368,8 +374,11 @@ class ResponsesSseTranslator:
                 },
             )
         if event_type == "response.completed":
+            completed_response = self._validator.completed_response
+            if completed_response is None:
+                raise _invalid()
             public_response = responses_to_public(
-                event["response"],
+                completed_response,
                 request=self._request,
                 public_model=self._public_model,
                 max_items=self._max_items,
@@ -400,8 +409,10 @@ class ResponsesSseTranslator:
                 continue
             if projected is not None:
                 yield projected
-        if not self._validator.saw_done or terminal is None:
+        if terminal is None:
             raise _invalid()
+        if not self._validator.saw_done:
+            self._validator.finish()
         yield terminal
         yield b"data: [DONE]\n\n"
 

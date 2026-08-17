@@ -22,6 +22,7 @@ from openai.types.responses import (
 )
 
 import codex_openai_bridge.app as app_module
+import codex_openai_bridge.upstream as upstream_module
 from codex_openai_bridge.app import create_app
 from codex_openai_bridge.auth import Credential
 from codex_openai_bridge.config import Settings
@@ -64,7 +65,12 @@ def test_stream_is_an_exact_boolean_and_is_preserved_upstream(
     assert request.stream is expected
     assert payload == {
         "model": "server-model",
-        "input": "hello",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            }
+        ],
         "store": False,
         "stream": expected,
         "include": ["reasoning.encrypted_content"],
@@ -105,6 +111,7 @@ class _StreamingOnlyUpstream:
         self.stream = _ByteStream([wire])
         self.stream_calls: list[tuple[Credential, dict[str, Any]]] = []
         self.nonstream_calls = 0
+        self.close_calls = 0
 
     async def create_stream(self, credential: Credential, payload: dict[str, Any]) -> _ByteStream:
         self.stream_calls.append((credential, payload))
@@ -114,6 +121,9 @@ class _StreamingOnlyUpstream:
         del credential, payload
         self.nonstream_calls += 1
         raise AssertionError("stream:true must never use create_response")
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
 
 
 class _CredentialManager:
@@ -226,9 +236,12 @@ async def _translate(
     document: dict[str, object] | None = None,
     max_sse_event_bytes: int = 4096,
     max_stream_bytes: int = 65536,
+    upstream_done: bool = True,
 ) -> list[bytes]:
     request = _parse(document or {"model": "codex", "input": "hello", "stream": True})
-    wire = b"".join(_event(event) for event in events) + b"data: [DONE]\n\n"
+    wire = b"".join(_event(event) for event in events)
+    if upstream_done:
+        wire += b"data: [DONE]\n\n"
     return [
         frame
         async for frame in translate_responses_sse_to_public(
@@ -285,6 +298,120 @@ async def test_direct_stream_projects_named_responses_events_and_completed_autho
     assert ResponseCreatedEvent.model_validate(decoded[0][1]).response.model == "codex"
     assert ResponseTextDeltaEvent.model_validate(delta).delta == "hello"
     assert ResponseCompletedEvent.model_validate(decoded[-1][1]).response.model == "codex"
+
+
+@pytest.mark.asyncio
+async def test_direct_stream_completed_eof_generates_sdk_done_marker() -> None:
+    frames = await _translate(_text_events(), upstream_done=False)
+
+    assert frames[-1] == b"data: [DONE]\n\n"
+    name, completed = _decode(frames[-2])
+    assert name == "response.completed"
+    assert completed["response"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_nonstream_transport_uses_one_stream_request_and_collects_completed_response(
+    tmp_path: Path,
+) -> None:
+    wire = b"".join(_event(event) for event in _text_events())
+    transport = _StreamingOnlyUpstream(wire)
+    adapter = upstream_module.BufferedResponsesUpstream(transport, _settings(tmp_path))
+    credential = _CredentialManager().credential
+    payload = {
+        "model": "server-model",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "store": False,
+        "stream": False,
+        "include": ["reasoning.encrypted_content"],
+    }
+
+    response = await adapter.create_response(credential, payload)
+
+    assert isinstance(response, dict)
+    assert response["status"] == "completed"
+    assert response["output"][0]["content"][0]["text"] == "hello"
+    assert transport.nonstream_calls == 0
+    assert transport.stream_calls == [
+        (
+            credential,
+            {
+                **payload,
+                "stream": True,
+                "store": False,
+                "include": ["reasoning.encrypted_content"],
+            },
+        )
+    ]
+    assert transport.stream.close_calls == 1
+
+
+@pytest.mark.parametrize("invalid_metadata", ["nonempty_logprobs", "negative_cache_write_tokens"])
+@pytest.mark.asyncio
+async def test_buffered_nonstream_rejects_malformed_live_metadata(
+    invalid_metadata: str,
+    tmp_path: Path,
+) -> None:
+    events = _text_events()
+    if invalid_metadata == "nonempty_logprobs":
+        delta = next(event for event in events if event["type"] == "response.output_text.delta")
+        delta["logprobs"] = [{"token": "private"}]
+    else:
+        completed = next(event for event in events if event["type"] == "response.completed")
+        response = completed["response"]
+        assert isinstance(response, dict)
+        usage = response["usage"]
+        assert isinstance(usage, dict)
+        input_details = usage["input_tokens_details"]
+        assert isinstance(input_details, dict)
+        input_details["cache_write_tokens"] = -1
+    transport = _StreamingOnlyUpstream(b"".join(_event(event) for event in events))
+    adapter = upstream_module.BufferedResponsesUpstream(transport, _settings(tmp_path))
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        await adapter.create_response(
+            _CredentialManager().credential,
+            {"model": "server-model", "input": [], "store": False, "stream": False},
+        )
+
+    assert transport.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_live_codex_metadata_is_stripped_and_done_items_restore_output() -> None:
+    events = _text_events()
+    for event in events:
+        if event["type"] in {"response.output_item.added", "response.output_item.done"}:
+            item = event["item"]
+            assert isinstance(item, dict)
+            item["phase"] = "final_answer"
+            for part in item["content"]:
+                part["logprobs"] = []
+        if event["type"] in {"response.content_part.added", "response.content_part.done"}:
+            part = event["part"]
+            assert isinstance(part, dict)
+            part["logprobs"] = []
+        if event["type"] == "response.output_text.delta":
+            event["obfuscation"] = "bounded-padding"
+        if event["type"] == "response.completed":
+            response = event["response"]
+            assert isinstance(response, dict)
+            response["output"] = []
+            usage = response["usage"]
+            assert isinstance(usage, dict)
+            input_details = usage["input_tokens_details"]
+            assert isinstance(input_details, dict)
+            input_details["cache_write_tokens"] = 0
+
+    frames = await _translate(events, upstream_done=False)
+
+    serialized = b"".join(frames)
+    assert b"phase" not in serialized
+    assert b"obfuscation" not in serialized
+    assert b"bounded-padding" not in serialized
+    assert b"cache_write_tokens" not in serialized
+    _, completed = _decode(frames[-2])
+    assert completed["response"]["output"][0]["content"][0]["text"] == "hello"
 
 
 @pytest.mark.asyncio
@@ -708,7 +835,12 @@ async def test_stream_true_routes_only_to_stream_upstream_and_sdk_gets_final_res
             manager.credential,
             {
                 "model": settings.upstream_model,
-                "input": "hello",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "hello"}],
+                    }
+                ],
                 "store": False,
                 "stream": True,
                 "include": ["reasoning.encrypted_content"],

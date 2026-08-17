@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -132,9 +133,11 @@ async def _translate(source: AsyncIterator[bytes], *, include_usage: bool = Fals
     ]
 
 
-def _decode_chunk(frame: bytes) -> object:
+def _decode_chunk(frame: bytes) -> dict[str, Any]:
     assert frame.startswith(b"data: ") and frame.endswith(b"\n\n")
-    return json.loads(frame[6:-2])
+    value = json.loads(frame[6:-2])
+    assert isinstance(value, dict)
+    return value
 
 
 @pytest.mark.asyncio
@@ -145,25 +148,99 @@ async def test_text_role_deltas_final_usage_and_done_are_exact() -> None:
 
     assert len(frames) == 6
     role, first, second, final, usage = [_decode_chunk(frame) for frame in frames[:-1]]
-    assert role["id"] == "resp_123"  # type: ignore[index]
-    assert role["object"] == "chat.completion.chunk"  # type: ignore[index]
-    assert role["created"] == 1_700_000_000  # type: ignore[index]
-    assert role["model"] == "codex"  # type: ignore[index]
-    assert role["choices"] == [  # type: ignore[index]
+    assert role["id"] == "resp_123"
+    assert role["object"] == "chat.completion.chunk"
+    assert role["created"] == 1_700_000_000
+    assert role["model"] == "codex"
+    assert role["choices"] == [
         {"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}
     ]
-    assert first["choices"][0]["delta"] == {"content": "hel"}  # type: ignore[index]
-    assert second["choices"][0]["delta"] == {"content": "lo"}  # type: ignore[index]
-    assert final["choices"] == [  # type: ignore[index]
-        {"index": 0, "delta": {}, "finish_reason": "stop"}
-    ]
-    assert usage["choices"] == []  # type: ignore[index]
-    assert usage["usage"] == {  # type: ignore[index]
+    assert first["choices"][0]["delta"] == {"content": "hel"}
+    assert second["choices"][0]["delta"] == {"content": "lo"}
+    assert final["choices"] == [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    assert usage["choices"] == []
+    assert usage["usage"] == {
         "prompt_tokens": 2,
         "completion_tokens": 1,
         "total_tokens": 3,
     }
     assert frames[-1] == b"data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_completed_followed_by_live_codex_eof_generates_downstream_done() -> None:
+    wire = b"".join(_event(value) for value in _text_events())
+
+    frames = await _translate(_chunks(wire), include_usage=True)
+
+    assert frames[-1] == b"data: [DONE]\n\n"
+    assert _decode_chunk(frames[-2])["usage"] == {
+        "prompt_tokens": 2,
+        "completion_tokens": 1,
+        "total_tokens": 3,
+    }
+
+
+@pytest.mark.asyncio
+async def test_live_codex_phase_obfuscation_and_empty_terminal_output_are_closed() -> None:
+    events = _text_events()
+    for event in events:
+        if event["type"] in {"response.output_item.added", "response.output_item.done"}:
+            item = event["item"]
+            assert isinstance(item, dict)
+            item["phase"] = "final_answer"
+            for part in item["content"]:
+                part["logprobs"] = []
+        if event["type"] in {"response.content_part.added", "response.content_part.done"}:
+            part = event["part"]
+            assert isinstance(part, dict)
+            part["logprobs"] = []
+        if event["type"] == "response.output_text.delta":
+            event["obfuscation"] = "bounded-padding"
+        if event["type"] == "response.completed":
+            response = event["response"]
+            assert isinstance(response, dict)
+            response["output"] = []
+    wire = b"".join(_event(value) for value in events)
+
+    frames = await _translate(_chunks(wire))
+
+    serialized = b"".join(frames)
+    visible_text = "".join(
+        str(decoded["choices"][0]["delta"].get("content", ""))
+        for frame in frames[:-1]
+        if (decoded := _decode_chunk(frame))["choices"]
+    )
+    assert visible_text == "hello"
+    assert b"phase" not in serialized
+    assert b"obfuscation" not in serialized
+    assert b"bounded-padding" not in serialized
+    assert frames[-1] == b"data: [DONE]\n\n"
+
+
+@pytest.mark.parametrize("invalid_metadata", ["nonempty_logprobs", "negative_cache_write_tokens"])
+@pytest.mark.asyncio
+async def test_chat_stream_rejects_malformed_live_metadata(invalid_metadata: str) -> None:
+    events = _text_events()
+    if invalid_metadata == "nonempty_logprobs":
+        delta = next(event for event in events if event["type"] == "response.output_text.delta")
+        delta["logprobs"] = [{"token": "private"}]
+    else:
+        completed = next(event for event in events if event["type"] == "response.completed")
+        response = completed["response"]
+        assert isinstance(response, dict)
+        response["usage"] = {
+            "input_tokens": 2,
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": -1},
+            "output_tokens": 1,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 3,
+        }
+
+    wire = b"".join(_event(value) for value in events)
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        await _translate(_chunks(wire))
 
 
 @pytest.mark.asyncio
@@ -312,12 +389,16 @@ def _tool_events() -> list[dict[str, object]]:
 
 @pytest.mark.asyncio
 async def test_parallel_tool_declarations_arguments_and_indexes_preserve_event_order() -> None:
-    wire = b"".join(_event(value) for value in _tool_events()) + b"data: [DONE]\n\n"
+    events = _tool_events()
+    for event in events:
+        if event["type"] == "response.function_call_arguments.delta":
+            event["obfuscation"] = "bounded-tool-padding"
+    wire = b"".join(_event(value) for value in events) + b"data: [DONE]\n\n"
 
     frames = await _translate(_chunks(wire))
     chunks = [_decode_chunk(frame) for frame in frames[:-1]]
 
-    assert chunks[1]["choices"][0]["delta"]["tool_calls"] == [  # type: ignore[index]
+    assert chunks[1]["choices"][0]["delta"]["tool_calls"] == [
         {
             "index": 0,
             "id": "call_public_1",
@@ -325,20 +406,19 @@ async def test_parallel_tool_declarations_arguments_and_indexes_preserve_event_o
             "function": {"name": "weather", "arguments": ""},
         }
     ]
-    assert chunks[2]["choices"][0]["delta"]["tool_calls"][0]["index"] == 1  # type: ignore[index]
-    argument_updates = [
-        chunk["choices"][0]["delta"]["tool_calls"][0]  # type: ignore[index]
-        for chunk in chunks[3:-1]
-    ]
+    assert chunks[2]["choices"][0]["delta"]["tool_calls"][0]["index"] == 1
+    argument_updates = [chunk["choices"][0]["delta"]["tool_calls"][0] for chunk in chunks[3:-1]]
     assert [(update["index"], update["function"]["arguments"]) for update in argument_updates] == [
         (0, '{"city":'),
         (1, "{}"),
         (0, '"Tokyo"}'),
     ]
-    assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"  # type: ignore[index]
+    assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
     serialized = b"".join(frames)
     assert b"fc_1" not in serialized
     assert b"fc_2" not in serialized
+    assert b"obfuscation" not in serialized
+    assert b"bounded-tool-padding" not in serialized
 
 
 @pytest.mark.asyncio

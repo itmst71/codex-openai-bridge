@@ -6,7 +6,7 @@ import json
 import math
 import secrets
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
@@ -19,6 +19,8 @@ from codex_openai_bridge.wire import (
     ToolCall,
     create_reasoning_binding_id,
     encrypted_reasoning_data_digest,
+    json_schema_for_upstream,
+    json_schema_name_for_upstream,
 )
 
 
@@ -143,7 +145,7 @@ def _decode_sse_lines(
 
 
 async def parse_responses_sse(
-    chunks: AsyncIterator[bytes],
+    chunks: AsyncIterable[bytes],
     *,
     max_sse_event_bytes: int,
     max_stream_bytes: int,
@@ -296,6 +298,41 @@ def _nonnegative_int(value: object) -> int:
     return value
 
 
+def _empty_logprobs(value: object) -> bool:
+    return value is None or (type(value) is list and not value)
+
+
+def _validate_stream_usage(value: object) -> StreamUsage:
+    if type(value) is not dict:
+        raise _invalid_stream()
+    base_fields = {"input_tokens", "output_tokens", "total_tokens"}
+    detail_fields = {"input_tokens_details", "output_tokens_details"}
+    if set(value) not in (base_fields, base_fields | detail_fields):
+        raise _invalid_stream()
+    prompt = _nonnegative_int(value["input_tokens"])
+    completion = _nonnegative_int(value["output_tokens"])
+    total = _nonnegative_int(value["total_tokens"])
+    if detail_fields <= set(value):
+        input_details = value["input_tokens_details"]
+        output_details = value["output_tokens_details"]
+        if (
+            type(input_details) is not dict
+            or set(input_details)
+            not in (
+                {"cached_tokens"},
+                {"cached_tokens", "cache_write_tokens"},
+            )
+            or type(output_details) is not dict
+            or set(output_details) != {"reasoning_tokens"}
+        ):
+            raise _invalid_stream()
+        _nonnegative_int(input_details["cached_tokens"])
+        if "cache_write_tokens" in input_details:
+            _nonnegative_int(input_details["cache_write_tokens"])
+        _nonnegative_int(output_details["reasoning_tokens"])
+    return StreamUsage(prompt, completion, total)
+
+
 class _ResponsesStreamTranslator:
     def __init__(
         self,
@@ -333,10 +370,12 @@ class _ResponsesStreamTranslator:
         ] = {}
         self.item_ids: set[str] = set()
         self.done_items: dict[int, dict[str, Any]] = {}
+        self.projected_done_items: dict[int, dict[str, Any]] = {}
         self.last_sequence: int | None = None
         self.setup_events: set[str] = set()
         self.unknown_events = 0
         self.completed = False
+        self.completed_response: dict[str, Any] | None = None
         self.saw_done = False
         self.usage: StreamUsage | None = None
 
@@ -407,17 +446,30 @@ class _ResponsesStreamTranslator:
         if type(value) is not dict:
             raise _invalid_stream()
         required = {"id", "type", "status", "role", "content"}
-        if set(value) != required:
+        if not required <= set(value) or not set(value) <= required | {"phase"}:
             raise _invalid_stream()
+        content = value["content"]
         if (
             value["type"] != "message"
             or value["status"] != status
             or value["role"] != "assistant"
-            or type(value["content"]) is not list
+            or type(content) is not list
+            or ("phase" in value and value["phase"] != "final_answer")
         ):
             raise _invalid_stream()
         _nonempty_string(value["id"])
-        return value
+        canonical_content: list[dict[str, Any]] = []
+        for part in content:
+            if type(part) is not dict or type(part.get("text")) is not str:
+                raise _invalid_stream()
+            canonical_content.append(self._text_part(part, expected_text=part["text"]))
+        return {
+            "id": value["id"],
+            "type": value["type"],
+            "status": value["status"],
+            "role": value["role"],
+            "content": canonical_content,
+        }
 
     def _text_part(self, value: object, *, expected_text: str) -> dict[str, Any]:
         if type(value) is not dict:
@@ -428,11 +480,11 @@ class _ResponsesStreamTranslator:
             raise _invalid_stream()
         if value["type"] != "output_text" or value["text"] != expected_text:
             raise _invalid_stream()
-        if "annotations" in value and type(value["annotations"]) is not list:
+        if "annotations" in value and value["annotations"] != []:
             raise _invalid_stream()
-        if "logprobs" in value and type(value["logprobs"]) is not list:
+        if "logprobs" in value and not _empty_logprobs(value["logprobs"]):
             raise _invalid_stream()
-        return value
+        return {"type": "output_text", "text": expected_text, "annotations": []}
 
     def _function_item(self, value: object, *, status: str) -> dict[str, Any]:
         if type(value) is not dict:
@@ -574,13 +626,18 @@ class _ResponsesStreamTranslator:
         _exact_fields(
             event,
             {"type", "item_id", "output_index", "content_index", "delta"},
-            {"sequence_number", "logprobs"},
+            {"sequence_number", "logprobs", "obfuscation"},
         )
         state = self._matching_text_event(event)
         delta = event["delta"]
         if not state.content_added or state.text_done or type(delta) is not str:
             raise _invalid_stream()
-        if "logprobs" in event and type(event["logprobs"]) is not list:
+        if "logprobs" in event and not _empty_logprobs(event["logprobs"]):
+            raise _invalid_stream()
+        if "obfuscation" in event and (
+            type(event["obfuscation"]) is not str
+            or len(event["obfuscation"].encode("utf-8", errors="strict")) > self.max_string_bytes
+        ):
             raise _invalid_stream()
         if len((state.text + delta).encode("utf-8", errors="strict")) > self.max_string_bytes:
             raise _invalid_stream()
@@ -609,7 +666,7 @@ class _ResponsesStreamTranslator:
         state = self._matching_text_event(event)
         if not state.content_added or state.text_done or event["text"] != state.text:
             raise _invalid_stream()
-        if "logprobs" in event and type(event["logprobs"]) is not list:
+        if "logprobs" in event and not _empty_logprobs(event["logprobs"]):
             raise _invalid_stream()
         state.text_done = True
         return ()
@@ -631,7 +688,7 @@ class _ResponsesStreamTranslator:
         _exact_fields(
             event,
             {"type", "item_id", "output_index", "delta"},
-            {"sequence_number"},
+            {"sequence_number", "obfuscation"},
         )
         item_id = _nonempty_string(event["item_id"])
         state = self.tools.get(item_id)
@@ -641,6 +698,14 @@ class _ResponsesStreamTranslator:
             or self._validate_output_index(event) != state.output_index
             or state.arguments_done
             or type(delta) is not str
+            or (
+                "obfuscation" in event
+                and (
+                    type(event["obfuscation"]) is not str
+                    or len(event["obfuscation"].encode("utf-8", errors="strict"))
+                    > self.max_string_bytes
+                )
+            )
         ):
             raise _invalid_stream()
         if len((state.arguments + delta).encode("utf-8", errors="strict")) > self.max_string_bytes:
@@ -695,35 +760,34 @@ class _ResponsesStreamTranslator:
         state = self.items_by_index[output_index]
         item = event["item"]
         if isinstance(state, _ReasoningStreamItem):
-            reasoning = self._reasoning_item(item, status="completed")
-            if reasoning["id"] != state.item_id:
+            projected_item = self._reasoning_item(item, status="completed")
+            if projected_item["id"] != state.item_id:
                 raise _invalid_stream()
-            self.done_items[output_index] = reasoning
-            return ()
-        if isinstance(state, _TextStreamItem):
-            message = self._message_item(item, status="completed")
-            if not state.part_done or state.item_done or message["id"] != state.item_id:
+        elif isinstance(state, _TextStreamItem):
+            projected_item = self._message_item(item, status="completed")
+            if not state.part_done or state.item_done or projected_item["id"] != state.item_id:
                 raise _invalid_stream()
-            content = message["content"]
+            content = projected_item["content"]
             if len(content) != 1:
                 raise _invalid_stream()
             self._text_part(content[0], expected_text=state.text)
             state.item_done = True
         elif isinstance(state, _ToolStreamItem):
-            function = self._function_item(item, status="completed")
+            projected_item = self._function_item(item, status="completed")
             if (
                 not state.arguments_done
                 or state.item_done
-                or function["id"] != state.item_id
-                or function["call_id"] != state.call_id
-                or function["name"] != state.name
-                or function["arguments"] != state.arguments
+                or projected_item["id"] != state.item_id
+                or projected_item["call_id"] != state.call_id
+                or projected_item["name"] != state.name
+                or projected_item["arguments"] != state.arguments
             ):
                 raise _invalid_stream()
             state.item_done = True
         else:
             raise _invalid_stream()
         self.done_items[output_index] = item
+        self.projected_done_items[output_index] = projected_item
         return ()
 
     def _on_completed(self, event: dict[str, Any]) -> tuple[bytes, ...]:
@@ -735,46 +799,52 @@ class _ResponsesStreamTranslator:
         usage = response.get("usage")
         if (
             type(output) is not list
-            or len(output) != self.next_output_index
             or type(usage) is not dict
             or set(self.done_items) != set(range(self.next_output_index))
+            or set(self.projected_done_items) != set(range(self.next_output_index))
+            or (output and len(output) != self.next_output_index)
         ):
             raise _invalid_stream()
-        for index, item in enumerate(output):
-            if not _json_type_exact_equal(item, self.done_items[index]):
-                raise _invalid_stream()
-        prompt = _nonnegative_int(usage.get("input_tokens"))
-        completion = _nonnegative_int(usage.get("output_tokens"))
-        total = _nonnegative_int(usage.get("total_tokens"))
-        self.usage = StreamUsage(prompt, completion, total)
+        if output:
+            for index, item in enumerate(output):
+                if not _json_type_exact_equal(item, self.done_items[index]):
+                    raise _invalid_stream()
+        self.usage = _validate_stream_usage(usage)
         if self.text_item is None and not self.tools:
             raise _invalid_stream()
+        self.completed_response = dict(response)
+        self.completed_response["output"] = [
+            deepcopy(self.projected_done_items[index]) for index in range(self.next_output_index)
+        ]
         self.completed = True
         return ()
+
+    def finish(self) -> tuple[bytes, ...]:
+        if self.saw_done or not self.completed or self.usage is None:
+            raise _invalid_stream()
+        self.saw_done = True
+        frames: list[bytes] = []
+        if not self.visible:
+            self.visible = True
+            frames.append(self._role_frame())
+        finish_reason = "tool_calls" if self.tools else "stop"
+        frames.append(
+            self._frame(
+                self._base_chunk([{"index": 0, "delta": {}, "finish_reason": finish_reason}])
+            )
+        )
+        if self.include_usage:
+            usage_chunk = self._base_chunk([])
+            usage_chunk["usage"] = self.usage.as_dict()
+            frames.append(self._frame(usage_chunk))
+        frames.append(b"data: [DONE]\n\n")
+        return tuple(frames)
 
     def feed(self, parsed: ParsedSseEvent) -> tuple[bytes, ...]:
         if self.saw_done:
             raise _invalid_stream()
         if parsed.done:
-            if not self.completed or self.usage is None:
-                raise _invalid_stream()
-            self.saw_done = True
-            frames: list[bytes] = []
-            if not self.visible:
-                self.visible = True
-                frames.append(self._role_frame())
-            finish_reason = "tool_calls" if self.tools else "stop"
-            frames.append(
-                self._frame(
-                    self._base_chunk([{"index": 0, "delta": {}, "finish_reason": finish_reason}])
-                )
-            )
-            if self.include_usage:
-                usage_chunk = self._base_chunk([])
-                usage_chunk["usage"] = self.usage.as_dict()
-                frames.append(self._frame(usage_chunk))
-            frames.append(b"data: [DONE]\n\n")
-            return tuple(frames)
+            return self.finish()
         if self.completed or parsed.data is None:
             raise _invalid_stream()
         event = parsed.data
@@ -840,6 +910,10 @@ class ResponsesStreamValidator:
         """Validate an event while deliberately discarding Chat wire frames."""
         self._translator.feed(event)
 
+    def finish(self) -> None:
+        """Validate completed authority at a clean upstream EOF."""
+        self._translator.finish()
+
     @property
     def saw_done(self) -> bool:
         return self._translator.saw_done
@@ -847,6 +921,10 @@ class ResponsesStreamValidator:
     @property
     def last_sequence(self) -> int | None:
         return self._translator.last_sequence
+
+    @property
+    def completed_response(self) -> dict[str, Any] | None:
+        return self._translator.completed_response
 
 
 async def translate_responses_sse(
@@ -882,8 +960,8 @@ async def translate_responses_sse(
             continue
         for frame in frames:
             yield frame
-    if not translator.saw_done or terminal_frames is None:
-        raise _invalid_stream()
+    if terminal_frames is None:
+        terminal_frames = translator.finish()
     for frame in terminal_frames:
         yield frame
 
@@ -949,8 +1027,9 @@ def chat_request_to_responses(
                 }
             )
     payload["input"] = translated_input
-    if request.max_output_tokens is not None:
-        payload["max_output_tokens"] = request.max_output_tokens
+    # The ChatGPT Codex Responses endpoint rejects max_output_tokens. Keep the
+    # public aliases parse-compatible for Honcho/OpenAI SDK callers, but rely on
+    # the bridge's response-byte and deadline bounds instead of forwarding it.
     if request.tools:
         payload["tools"] = []
         for tool in request.tools:
@@ -977,8 +1056,8 @@ def chat_request_to_responses(
         else:
             response_format = {
                 "type": "json_schema",
-                "name": request.response_format.name,
-                "schema": deepcopy(request.response_format.schema),
+                "name": json_schema_name_for_upstream(request.response_format.name),
+                "schema": json_schema_for_upstream(request.response_format.schema),
             }
             if request.response_format.description is not None:
                 response_format["description"] = request.response_format.description

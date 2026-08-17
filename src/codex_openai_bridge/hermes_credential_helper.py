@@ -8,7 +8,8 @@ import contextlib
 import json
 import os
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 _ERROR_LINE = "credential helper failed"
@@ -112,6 +113,21 @@ def _build_protocol(resolved: object) -> dict[str, object]:
     }
 
 
+@contextlib.contextmanager
+def _hermes_source_import_path() -> Iterator[None]:
+    source_root = str(Path(sys.prefix).resolve(strict=True).parent)
+    helper_directory = str(Path(__file__).resolve(strict=True).parent)
+    original_path = list(sys.path)
+    sys.path[:] = [
+        source_root,
+        *(entry for entry in original_path if entry not in (source_root, helper_directory)),
+    ]
+    try:
+        yield
+    finally:
+        sys.path[:] = original_path
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Resolve credentials and emit exactly one bounded protocol document."""
     arguments = sys.argv[1:] if argv is None else argv
@@ -119,12 +135,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         force_refresh = _parse_force_refresh(arguments)
         with open(os.devnull, "w", encoding="utf-8") as sink:
             with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-                from hermes_cli.auth import (  # type: ignore[import-not-found]
-                    resolve_codex_runtime_credentials,
-                )
+                with _hermes_source_import_path():
+                    from hermes_cli.auth import (  # type: ignore[import-not-found]
+                        resolve_codex_runtime_credentials,
+                    )
 
-                resolver: Callable[..., object] = resolve_codex_runtime_credentials
-                resolved = resolver(force_refresh=force_refresh)
+                    resolver: Callable[..., object] = resolve_codex_runtime_credentials
+                    resolved = resolver(force_refresh=force_refresh)
         protocol = _build_protocol(resolved)
         sys.stdout.write(json.dumps(protocol, separators=(",", ":")) + "\n")
         return 0

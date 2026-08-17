@@ -100,6 +100,23 @@ async def test_stream_posts_once_with_forced_invariants_and_owned_close() -> Non
 
 
 @pytest.mark.asyncio
+async def test_stream_accepts_live_codex_response_without_content_type_header() -> None:
+    body = _TrackingStream([b"data: one\n\n"])
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=body)
+
+    upstream = HttpxResponsesUpstream(Settings.from_env(), transport=httpx.MockTransport(handler))
+    try:
+        stream = await upstream.create_stream(_credential(), {})
+        assert await _collect_stream(stream) == [b"data: one\n\n"]
+    finally:
+        await upstream.aclose()
+
+    assert body.close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_stream_rejects_duplicate_charset_parameters_before_body_use() -> None:
     body = _TrackingStream([b"data: [DONE]\n\n"])
 

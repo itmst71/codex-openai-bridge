@@ -15,6 +15,11 @@ import httpx
 
 from codex_openai_bridge.auth import Credential
 from codex_openai_bridge.config import Settings
+from codex_openai_bridge.translation import (
+    ResponsesStreamValidator,
+    UpstreamResponseError,
+    parse_responses_sse,
+)
 
 _ORIGINATOR = "codex_cli_rs"
 _USER_AGENT = "codex_cli_rs/0.0.0"
@@ -137,6 +142,67 @@ class StreamingResponsesUpstream(Protocol):
         credential: Credential,
         payload: dict[str, Any],
     ) -> ResponsesByteStream: ...
+
+
+class OwnedStreamingResponsesUpstream(StreamingResponsesUpstream, Protocol):
+    """Streaming transport owned by the application lifecycle."""
+
+    async def aclose(self) -> None: ...
+
+
+class BufferedResponsesUpstream:
+    """Expose public non-stream calls over the stream-only Codex backend."""
+
+    def __init__(self, upstream: OwnedStreamingResponsesUpstream, settings: Settings) -> None:
+        self._upstream = upstream
+        self._settings = settings
+
+    async def create_stream(
+        self,
+        credential: Credential,
+        payload: dict[str, Any],
+    ) -> ResponsesByteStream:
+        return await self._upstream.create_stream(credential, payload)
+
+    async def create_response(
+        self,
+        credential: Credential,
+        payload: dict[str, Any],
+    ) -> object:
+        streaming_payload = dict(payload)
+        streaming_payload["stream"] = True
+        streaming_payload["store"] = False
+        streaming_payload["include"] = ["reasoning.encrypted_content"]
+        stream = await self._upstream.create_stream(credential, streaming_payload)
+        validator = ResponsesStreamValidator(
+            public_model=self._settings.public_model,
+            max_unknown_events=self._settings.max_json_nodes,
+            max_string_bytes=self._settings.max_string_bytes,
+        )
+        try:
+            async for event in parse_responses_sse(
+                stream,
+                max_sse_event_bytes=self._settings.max_sse_event_bytes,
+                max_stream_bytes=self._settings.max_stream_bytes,
+                max_json_depth=self._settings.max_json_depth,
+                max_json_nodes=self._settings.max_json_nodes,
+                max_string_bytes=self._settings.max_string_bytes,
+            ):
+                validator.feed(event)
+            response = validator.completed_response
+            if response is None:
+                raise UpstreamResponseError("invalid upstream response")
+            return response
+        finally:
+            primary_error = sys.exception()
+            try:
+                await stream.aclose()
+            except BaseException:
+                if primary_error is None:
+                    raise
+
+    async def aclose(self) -> None:
+        await self._upstream.aclose()
 
 
 def _credential_is_valid(credential: object) -> bool:
@@ -309,6 +375,8 @@ class HttpxResponsesUpstream:
         ):
             raise ValueError
         content_types = response.headers.get_list("Content-Type")
+        if not content_types:
+            return
         if len(content_types) != 1:
             raise ValueError
         pieces = [piece.strip().lower() for piece in content_types[0].split(";")]

@@ -32,6 +32,7 @@ The public model name is always `codex`. The bridge reconstructs the upstream mo
 | `POST /v1/responses` | Supported, including named Responses SSE events |
 | Function/tool calling and tool history | Supported with strict identity checks |
 | `text`, `json_object`, and `json_schema` response formats | Supported subject to upstream behavior |
+| `max_tokens`, `max_completion_tokens`, and `max_output_tokens` | Accepted and strictly validated for SDK/Honcho compatibility, but not forwarded because the Codex OAuth backend rejects `max_output_tokens` |
 | Usage projection and encrypted reasoning round-trip | Supported with bounded validation |
 | `POST /v1/embeddings` | **Embeddings are not supported**; returns a sanitized unsupported error |
 | Client-selected upstream URL/model/account/auth policy | Unsupported and ignored/rejected |
@@ -162,6 +163,13 @@ EMBED_MESSAGES=false
 ```
 
 Do not point Honcho embedding requests at this bridge.
+
+Honcho currently sends a token-limit field on text calls. The bridge validates
+that field but cannot enforce it at generation time because the ChatGPT Codex
+Responses backend rejects `max_output_tokens`. The bridge still enforces its
+configured total deadline, upstream/downstream byte caps, SSE-event cap, and
+JSON bounds. Do not rely on a Honcho `max_tokens` value as an exact generation
+limit when this bridge is the text backend.
 
 ## curl example
 

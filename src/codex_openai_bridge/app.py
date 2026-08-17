@@ -45,6 +45,7 @@ from codex_openai_bridge.translation import (
     translate_responses_sse,
 )
 from codex_openai_bridge.upstream import (
+    BufferedResponsesUpstream,
     HttpxResponsesUpstream,
     ResponsesByteStream,
     ResponsesUpstream,
@@ -924,10 +925,11 @@ def create_app(
         async def refresh_credentials() -> Credential:
             return await credential_provider.get_credentials(force_refresh=True)
 
-        owned_upstream = HttpxResponsesUpstream(
+        transport = HttpxResponsesUpstream(
             settings,
             credential_refresher=refresh_credentials,
         )
+        owned_upstream = BufferedResponsesUpstream(transport, settings)
         app[_UPSTREAM_KEY] = owned_upstream
 
         async def close_owned_upstream(_app: web.Application) -> None:

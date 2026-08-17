@@ -94,6 +94,35 @@ class ChatCompletionRequest:
     include_usage: bool = False
 
 
+def json_schema_for_upstream(schema: dict[str, Any]) -> dict[str, Any]:
+    """Copy a validated schema while dropping unsupported annotations."""
+    try:
+        projected = deepcopy(schema)
+    except (MemoryError, RecursionError):
+        raise ChatRequestError("invalid request") from None
+    stack: list[dict[str, Any]] = [projected]
+    while stack:
+        candidate = stack.pop()
+        candidate.pop("title", None)
+        candidate.pop("description", None)
+        items = candidate.get("items")
+        if type(items) is dict:
+            stack.append(items)
+        any_of = candidate.get("anyOf")
+        if type(any_of) is list:
+            stack.extend(item for item in any_of if type(item) is dict)
+        for keyword in ("properties", "$defs"):
+            definitions = candidate.get(keyword)
+            if type(definitions) is dict:
+                stack.extend(item for item in definitions.values() if type(item) is dict)
+    return projected
+
+
+def json_schema_name_for_upstream(name: str) -> str:
+    """Project a validated public schema identifier to Codex's lowercase form."""
+    return name.lower()
+
+
 def model_list_document(public_model: str) -> dict[str, object]:
     """Build the stable, secret-free OpenAI model discovery document."""
     if type(public_model) is not str or not public_model:

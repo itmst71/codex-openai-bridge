@@ -7,7 +7,7 @@ import math
 import re
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from codex_openai_bridge.translation import UpstreamResponseError
 from codex_openai_bridge.wire import (
@@ -17,6 +17,8 @@ from codex_openai_bridge.wire import (
     JsonSchemaResponseFormat,
     NamedFunctionToolChoice,
     encrypted_reasoning_data_digest,
+    json_schema_for_upstream,
+    json_schema_name_for_upstream,
     parse_chat_completion_request,
 )
 
@@ -589,8 +591,8 @@ def _text_payload(
         return {"format": {"type": "json_object"}}
     value: dict[str, Any] = {
         "type": "json_schema",
-        "name": response_format.name,
-        "schema": deepcopy(response_format.schema),
+        "name": json_schema_name_for_upstream(response_format.name),
+        "schema": json_schema_for_upstream(response_format.schema),
     }
     if response_format.description is not None:
         value["description"] = response_format.description
@@ -605,17 +607,27 @@ def responses_request_to_upstream(
     upstream_model: str,
 ) -> dict[str, Any]:
     """Reconstruct a fixed-policy upstream Responses payload."""
+    upstream_input: list[dict[str, Any]]
+    if type(request.input) is str:
+        upstream_input = [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": request.input}],
+            }
+        ]
+    else:
+        upstream_input = deepcopy(list(cast(tuple[dict[str, Any], ...], request.input)))
     payload: dict[str, Any] = {
         "model": upstream_model,
-        "input": request.input if type(request.input) is str else deepcopy(list(request.input)),
+        "input": upstream_input,
         "store": False,
         "stream": request.stream,
         "include": ["reasoning.encrypted_content"],
     }
     if request.instructions is not None:
         payload["instructions"] = request.instructions
-    if request.max_output_tokens is not None:
-        payload["max_output_tokens"] = request.max_output_tokens
+    # The upstream Codex route rejects max_output_tokens; it remains a validated
+    # public compatibility field and is bounded locally by response bytes/time.
     if request.tools:
         payload["tools"] = [_tool_payload(tool) for tool in request.tools]
     choice = _tool_choice_payload(request.tool_choice)
@@ -677,9 +689,19 @@ def validate_responses_identifier(value: object) -> str:
     return _identifier(value, upstream=True)
 
 
-def _usage_detail(value: object, field: str) -> int:
-    if type(value) is not dict or set(value) != {field}:
+def _usage_detail(
+    value: object,
+    field: str,
+    *,
+    optional_fields: frozenset[str] = frozenset(),
+) -> int:
+    if type(value) is not dict or field not in value or not set(value) <= {field, *optional_fields}:
         raise UpstreamResponseError("invalid upstream response")
+    for optional_field in optional_fields:
+        if optional_field in value:
+            optional_value = value[optional_field]
+            if type(optional_value) is not int or optional_value < 0:
+                raise UpstreamResponseError("invalid upstream response")
     candidate = value[field]
     if type(candidate) is not int or candidate < 0:
         raise UpstreamResponseError("invalid upstream response")
@@ -906,7 +928,11 @@ def responses_to_public(
         if type(candidate) is not int or candidate < 0:
             raise UpstreamResponseError("invalid upstream response")
         exact_usage[field] = candidate
-    cached_tokens = _usage_detail(usage["input_tokens_details"], "cached_tokens")
+    cached_tokens = _usage_detail(
+        usage["input_tokens_details"],
+        "cached_tokens",
+        optional_fields=frozenset({"cache_write_tokens"}),
+    )
     reasoning_tokens = _usage_detail(usage["output_tokens_details"], "reasoning_tokens")
 
     tools = [_tool_payload(tool) for tool in request.tools]

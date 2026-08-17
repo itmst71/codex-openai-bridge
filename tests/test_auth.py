@@ -584,6 +584,70 @@ def _install_fake_hermes(
     monkeypatch.setitem(sys.modules, "hermes_cli.auth", auth)
 
 
+def test_helper_loads_hermes_source_from_its_venv_prefix_without_ambient_pythonpath(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    hermes_root = tmp_path / "hermes-agent"
+    venv = hermes_root / "venv"
+    package = hermes_root / "hermes_cli"
+    helper_package = tmp_path / "bridge-package"
+    venv.mkdir(parents=True)
+    package.mkdir()
+    helper_package.mkdir()
+    (helper_package / "hermes_credential_helper.py").write_text("", encoding="utf-8")
+    (helper_package / "collision_probe.py").write_text(
+        "ORIGIN = 'bridge sibling'\n",
+        encoding="utf-8",
+    )
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    token = _jwt(
+        {
+            "exp": 4_102_444_800,
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-live-shape"},
+        }
+    )
+    (package / "auth.py").write_text(
+        "try:\n"
+        "    import collision_probe\n"
+        "except ModuleNotFoundError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise RuntimeError('helper sibling import path leaked')\n"
+        "def resolve_codex_runtime_credentials(*, force_refresh):\n"
+        f"    return {{'api_key': {token!r}, 'base_url': 'https://example.invalid'}}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "prefix", str(venv))
+    monkeypatch.setattr(
+        hermes_credential_helper,
+        "__file__",
+        str(helper_package / "hermes_credential_helper.py"),
+    )
+    monkeypatch.syspath_prepend(str(helper_package))
+    monkeypatch.delitem(sys.modules, "hermes_cli", raising=False)
+    monkeypatch.delitem(sys.modules, "hermes_cli.auth", raising=False)
+    original_path = list(sys.path)
+
+    try:
+        assert hermes_credential_helper.main([]) == 0
+        captured = capsys.readouterr()
+    finally:
+        sys.modules.pop("hermes_cli.auth", None)
+        sys.modules.pop("hermes_cli", None)
+
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "version": 1,
+        "access_token": token,
+        "base_url": "https://example.invalid",
+        "account_id": "acct-live-shape",
+        "expires_at": 4_102_444_800,
+    }
+    assert sys.path == original_path
+
+
 @pytest.mark.parametrize("argv,expected_force", [([], False), (["--force-refresh"], True)])
 def test_helper_emits_only_versioned_protocol_and_calls_resolver_with_exact_bool(
     monkeypatch: pytest.MonkeyPatch,

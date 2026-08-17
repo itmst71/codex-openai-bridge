@@ -96,7 +96,7 @@ def test_ordered_user_and_assistant_history_uses_role_appropriate_text_parts() -
         },
         {"role": "user", "content": [{"type": "input_text", "text": "third"}]},
     ]
-    assert payload["max_output_tokens"] == 23
+    assert "max_output_tokens" not in payload
 
 
 def test_function_definitions_map_in_order_without_schema_aliasing() -> None:
@@ -185,8 +185,9 @@ def test_json_object_response_format_maps_to_exact_native_text_format() -> None:
 
 def test_json_schema_response_format_flattens_exactly_without_aliasing() -> None:
     schema = {
+        "title": "AnswerResult",
         "type": "object",
-        "properties": {"answer": {"type": "string"}},
+        "properties": {"answer": {"title": "Answer", "type": "string"}},
         "required": ["answer"],
         "additionalProperties": False,
     }
@@ -194,7 +195,7 @@ def test_json_schema_response_format_flattens_exactly_without_aliasing() -> None
         messages=(ChatMessage(role="user", content="answer"),),
         max_output_tokens=20,
         response_format=JsonSchemaResponseFormat(
-            name="answer_result",
+            name="Answer_Result",
             description="One answer",
             schema=schema,
             strict=True,
@@ -221,7 +222,61 @@ def test_json_schema_response_format_flattens_exactly_without_aliasing() -> None
     translated_schema["properties"] = {}
     parsed_format = request.response_format
     assert isinstance(parsed_format, JsonSchemaResponseFormat)
-    assert parsed_format.schema["properties"] == {"answer": {"type": "string"}}
+    assert parsed_format.schema == {
+        "title": "AnswerResult",
+        "type": "object",
+        "properties": {"answer": {"title": "Answer", "type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+
+
+def test_json_schema_projection_preserves_title_property_and_definition_names() -> None:
+    schema = {
+        "title": "Root metadata",
+        "type": "object",
+        "properties": {
+            "title": {"title": "Property metadata", "type": "string"},
+            "result": {"$ref": "#/$defs/title"},
+        },
+        "required": ["title", "result"],
+        "$defs": {"title": {"title": "Definition metadata", "type": "string"}},
+        "additionalProperties": False,
+    }
+    request = ChatCompletionRequest(
+        messages=(ChatMessage(role="user", content="answer"),),
+        max_output_tokens=None,
+        response_format=JsonSchemaResponseFormat(
+            name="Result",
+            description=None,
+            schema=schema,
+            strict=True,
+        ),
+    )
+
+    payload = chat_request_to_responses(request, upstream_model="upstream-model")
+
+    assert payload["text"]["format"]["schema"] == {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "result": {"$ref": "#/$defs/title"},
+        },
+        "required": ["title", "result"],
+        "$defs": {"title": {"type": "string"}},
+        "additionalProperties": False,
+    }
+    assert schema["title"] == "Root metadata"
+    properties = schema["properties"]
+    definitions = schema["$defs"]
+    assert isinstance(properties, dict)
+    assert isinstance(definitions, dict)
+    title_property = properties["title"]
+    title_definition = definitions["title"]
+    assert isinstance(title_property, dict)
+    assert isinstance(title_definition, dict)
+    assert title_property["title"] == "Property metadata"
+    assert title_definition["title"] == "Definition metadata"
 
 
 def test_optional_json_schema_fields_are_omitted_and_tools_coexist_exactly() -> None:
