@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import codex_openai_bridge.config as config_module
 from codex_openai_bridge.config import ConfigError, Settings
 
 MIB = 1024 * 1024
@@ -97,8 +98,9 @@ def test_default_paths_are_absolute_and_fixed() -> None:
     settings = Settings.from_env()
 
     assert settings.hermes_python_path == Path("/home/itmst/.hermes/hermes-agent/venv/bin/python")
-    assert settings.helper_path == Path(
-        "/home/itmst/src/codex-openai-bridge/src/codex_openai_bridge/hermes_credential_helper.py"
+    assert (
+        settings.helper_path
+        == Path(config_module.__file__).with_name("hermes_credential_helper.py").resolve()
     )
     assert settings.client_token_file == Path(
         "/home/itmst/.config/codex-openai-bridge/client-token"
