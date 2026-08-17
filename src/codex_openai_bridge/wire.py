@@ -11,6 +11,7 @@ import math
 import re
 from copy import deepcopy
 from dataclasses import dataclass
+from decimal import Decimal, DecimalException
 from typing import Any, Literal
 
 
@@ -120,11 +121,38 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError
 
 
-def _parse_finite_json_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed):
+@dataclass(frozen=True, slots=True)
+class _ExactJsonInteger:
+    value: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class _ExactJsonFloat:
+    value: Decimal
+
+
+def _parse_decimal(value: str) -> Decimal:
+    try:
+        parsed = Decimal(value)
+    except DecimalException:
+        raise ValueError from None
+    if not parsed.is_finite():
         raise ValueError
     return parsed
+
+
+def _parse_exact_json_integer(value: str) -> _ExactJsonInteger:
+    return _ExactJsonInteger(_parse_decimal(value))
+
+
+def _parse_exact_json_float(value: str) -> _ExactJsonFloat:
+    try:
+        binary_float = float(value)
+    except (OverflowError, ValueError):
+        raise ValueError from None
+    if not math.isfinite(binary_float):
+        raise ValueError
+    return _ExactJsonFloat(_parse_decimal(value))
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -136,7 +164,7 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def _validate_arguments_object(value: object) -> str:
+def _parse_arguments_object(value: object) -> dict[str, Any]:
     if type(value) is not str or not value:
         raise ChatRequestError("invalid request")
     try:
@@ -144,13 +172,63 @@ def _validate_arguments_object(value: object) -> str:
             value,
             object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=_reject_json_constant,
-            parse_float=_parse_finite_json_float,
+            parse_float=_parse_exact_json_float,
+            parse_int=_parse_exact_json_integer,
         )
     except (ValueError, OverflowError, RecursionError):
         raise ChatRequestError("invalid request") from None
     if type(parsed) is not dict:
         raise ChatRequestError("invalid request")
+    return parsed
+
+
+def _validate_arguments_object(value: object) -> str:
+    _parse_arguments_object(value)
+    if type(value) is not str:
+        raise ChatRequestError("invalid request")
     return value
+
+
+def _canonical_decimal(value: Decimal, *, preserve_zero_sign: bool) -> str:
+    sign, raw_digits, exponent = value.as_tuple()
+    if type(exponent) is not int:
+        raise ChatRequestError("invalid request")
+    digits = list(raw_digits)
+    if not digits or all(digit == 0 for digit in digits):
+        return f"{'-' if sign and preserve_zero_sign else ''}0e0"
+    while digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    coefficient = "".join(str(digit) for digit in digits)
+    return f"{'-' if sign else ''}{coefficient}e{exponent}"
+
+
+def _json_semantic_projection(value: object) -> object:
+    """Represent exact JSON semantics without binary-float or type collisions."""
+    if type(value) is dict:
+        return [
+            "object",
+            [[key, _json_semantic_projection(item)] for key, item in sorted(value.items())],
+        ]
+    if type(value) is list:
+        return ["array", [_json_semantic_projection(item) for item in value]]
+    if type(value) is str:
+        return ["string", value]
+    if type(value) is bool:
+        return ["boolean", value]
+    if value is None:
+        return ["null"]
+    if type(value) is _ExactJsonInteger:
+        return [
+            "integer",
+            _canonical_decimal(value.value, preserve_zero_sign=False),
+        ]
+    if type(value) is _ExactJsonFloat:
+        return [
+            "number",
+            _canonical_decimal(value.value, preserve_zero_sign=True),
+        ]
+    raise ChatRequestError("invalid request")
 
 
 _SCHEMA_KEYWORDS = {
@@ -171,7 +249,7 @@ _SCHEMA_TYPES = {"null", "boolean", "object", "array", "number", "integer", "str
 _LOCAL_DEFS_REF = re.compile(r"#/(?:\$defs)/(?:[^/~]|~[01])+(?:/(?:[^/~]|~[01])+)*\Z")
 _FORMAT_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
 _BASE64_CORE = re.compile(r"[A-Za-z0-9+/_-]+={0,2}\Z", re.ASCII)
-_REASONING_BINDING_PREFIX = "cobr_r1_"
+_REASONING_BINDING_PREFIX = "cobr_r2_"
 
 
 def encrypted_reasoning_data_digest(value: object, *, max_string_bytes: int) -> bytes | None:
@@ -221,12 +299,17 @@ def encrypted_reasoning_data_is_valid(value: object, *, max_string_bytes: int) -
     return encrypted_reasoning_data_digest(value, max_string_bytes=max_string_bytes) is not None
 
 
-def _public_tool_call_projection(tool_calls: tuple[ToolCall, ...]) -> list[dict[str, object]]:
+def _reasoning_tool_call_projection(
+    tool_calls: tuple[ToolCall, ...],
+) -> list[dict[str, object]]:
     return [
         {
             "id": call.call_id,
             "type": "function",
-            "function": {"name": call.name, "arguments": call.arguments},
+            "function": {
+                "name": call.name,
+                "arguments": _json_semantic_projection(_parse_arguments_object(call.arguments)),
+            },
         }
         for call in tool_calls
     ]
@@ -240,7 +323,7 @@ def create_reasoning_binding_id(
     index: int,
     data: str,
 ) -> str:
-    """Bind opaque state to its exact public assistant message projection."""
+    """Bind opaque state to assistant semantics, canonicalizing tool JSON objects."""
     if (
         type(binding_key) is not str
         or not binding_key
@@ -254,9 +337,9 @@ def create_reasoning_binding_id(
         key = binding_key.encode("utf-8", errors="strict")
         canonical = json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "content": content,
-                "tool_calls": _public_tool_call_projection(tool_calls),
+                "tool_calls": _reasoning_tool_call_projection(tool_calls),
                 "index": index,
                 "data": data,
             },

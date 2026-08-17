@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import web
@@ -1162,7 +1163,7 @@ async def test_two_call_encrypted_reasoning_round_trip_survives_sdk_and_replays_
         "id": detail["id"],
         "index": 0,
     }
-    assert detail["id"].startswith("cobr_r1_")
+    assert detail["id"].startswith("cobr_r2_")
     assert "PRIVATE" not in repr(first_body)
     assert "raw-secret-id" not in repr(first_body)
 
@@ -2245,3 +2246,65 @@ async def test_models_requires_auth_and_returns_stable_secret_free_capabilities(
     assert TOKEN not in serialized
     assert settings.upstream_model not in serialized
     assert upstream.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("headers", "status", "code"),
+    [
+        (
+            {
+                "Content-Type": "application/json",
+                "Content-Length": "2",
+                "Expect": "100-continue",
+            },
+            401,
+            "invalid_api_key",
+        ),
+        (
+            {
+                "Authorization": f"Bearer {TOKEN}",
+                "Content-Type": "application/json",
+                "Content-Length": "999999999",
+                "Expect": "100-continue",
+            },
+            413,
+            "request_too_large",
+        ),
+        (
+            {
+                "Authorization": f"Bearer {TOKEN}",
+                "Content-Type": "application/json",
+                "Content-Length": "2",
+                "Expect": "100-continue",
+            },
+            400,
+            "unsupported_endpoint",
+        ),
+    ],
+)
+async def test_embeddings_expect_is_rejected_before_body_upload_without_admission(
+    tmp_path: Path,
+    headers: dict[str, str],
+    status: int,
+    code: str,
+) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager(), upstream=FakeUpstream({}))
+    writer = AsyncMock()
+    request = make_mocked_request(
+        "POST",
+        "/v1/embeddings",
+        headers=headers,
+        app=app,
+        writer=writer,
+    )
+
+    response = await app_module._unsupported_embeddings_expect_handler(request)
+
+    assert isinstance(response, web.Response)
+    assert response.status == status
+    assert isinstance(response.body, (bytes, bytearray))
+    assert json.loads(response.body)["error"]["code"] == code
+    assert re.fullmatch(r"[0-9a-f]{32}", response.headers["X-Request-ID"])
+    writer.write.assert_not_awaited()
+    assert app[app_module._ADMISSION_KEY].active_count == 0

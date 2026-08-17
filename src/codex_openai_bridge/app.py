@@ -245,6 +245,39 @@ async def _models(request: web.Request) -> web.Response:
     return web.json_response(model_list_document(request.app[_SETTINGS_KEY].public_model))
 
 
+async def _unsupported_embeddings(_request: web.Request) -> web.Response:
+    return openai_error_response(
+        status=400,
+        message="Embeddings are not supported",
+        error_type="invalid_request_error",
+        code="unsupported_endpoint",
+    )
+
+
+async def _unsupported_embeddings_expect_handler(request: web.Request) -> web.StreamResponse:
+    """Reject an unsupported upload before aiohttp emits ``100 Continue``."""
+    if not _request_is_authorized(request):
+        response = openai_error_response(
+            status=401,
+            message="Invalid authentication credentials",
+            error_type="invalid_request_error",
+            code="invalid_api_key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    else:
+        try:
+            validate_json_request_headers(
+                request,
+                max_body_bytes=request.app[_SETTINGS_KEY].max_request_body_bytes,
+            )
+        except JsonBoundaryError as error:
+            response = _json_boundary_response(error)
+        else:
+            response = await _unsupported_embeddings(request)
+    response.headers[_REQUEST_ID_HEADER] = _assign_request_id(request)
+    return response
+
+
 def _credential_is_ready(value: object, *, now: float) -> bool:
     return (
         type(value) is Credential
@@ -793,6 +826,11 @@ def create_app(
     app.router.add_get("/healthz", _healthz)
     app.router.add_get("/readyz", _readyz)
     app.router.add_get("/v1/models", _models)
+    app.router.add_post(
+        "/v1/embeddings",
+        _unsupported_embeddings,
+        expect_handler=_unsupported_embeddings_expect_handler,
+    )
     app.router.add_post(
         "/v1/chat/completions",
         _chat_completions,

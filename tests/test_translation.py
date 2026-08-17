@@ -437,7 +437,7 @@ def _expected_binding_id(
 ) -> str:
     canonical = json.dumps(
         {
-            "version": 1,
+            "version": 2,
             "content": content,
             "tool_calls": tool_calls,
             "index": index,
@@ -448,7 +448,7 @@ def _expected_binding_id(
         separators=(",", ":"),
     ).encode()
     digest = hmac.new(b"bridge-secret", canonical, hashlib.sha256).digest()
-    return "cobr_r1_" + base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    return "cobr_r2_" + base64.urlsafe_b64encode(digest).decode().rstrip("=")
 
 
 def test_encrypted_reasoning_maps_to_exact_bound_public_details_and_strips_raw_fields() -> None:

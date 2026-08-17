@@ -1296,7 +1296,7 @@ async def test_responses_auth_and_request_id_use_shared_middlewares(tmp_path: Pa
         assert __import__("re").fullmatch(r"[0-9a-f]{32}", response.headers["X-Request-ID"])
 
 
-def test_responses_route_is_registered_and_embeddings_remain_absent(
+def test_responses_and_explicitly_unsupported_embeddings_routes_are_registered(
     tmp_path: Path,
 ) -> None:
     app = create_app(_settings(tmp_path), NeverCredentialManager(), upstream=FakeUpstream([]))
@@ -1307,4 +1307,4 @@ def test_responses_route_is_registered_and_embeddings_remain_absent(
     }
 
     assert ("POST", "/v1/responses") in routes
-    assert all(path != "/v1/embeddings" for _method, path in routes)
+    assert ("POST", "/v1/embeddings") in routes

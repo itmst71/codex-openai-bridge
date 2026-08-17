@@ -836,6 +836,120 @@ def test_reasoning_binding_directly_covers_content_calls_index_and_data() -> Non
         assert not reasoning_binding_is_valid(**values)  # type: ignore[arg-type]
 
 
+def test_reasoning_binding_canonicalizes_tool_argument_object_not_meaning() -> None:
+    original = (ToolCall(call_id="call_1", name="lookup", arguments='{"b":2,"a":1}'),)
+    binding_id = create_reasoning_binding_id(
+        binding_key="bridge-secret",
+        content=None,
+        tool_calls=original,
+        index=0,
+        data="c2VjcmV0",
+    )
+
+    assert reasoning_binding_is_valid(
+        binding_key="bridge-secret",
+        content=None,
+        tool_calls=(
+            ToolCall(
+                call_id="call_1",
+                name="lookup",
+                arguments='{ "a": 1, "b": 2 }',
+            ),
+        ),
+        index=0,
+        data="c2VjcmV0",
+        binding_id=binding_id,
+    )
+    assert not reasoning_binding_is_valid(
+        binding_key="bridge-secret",
+        content=None,
+        tool_calls=(
+            ToolCall(
+                call_id="call_1",
+                name="lookup",
+                arguments='{"a":1,"b":3}',
+            ),
+        ),
+        index=0,
+        data="c2VjcmV0",
+        binding_id=binding_id,
+    )
+
+
+def test_reasoning_binding_does_not_collapse_distinct_large_json_decimals() -> None:
+    original = (
+        ToolCall(
+            call_id="call_1",
+            name="lookup",
+            arguments='{"amount":9007199254740992.0}',
+        ),
+    )
+    binding_id = create_reasoning_binding_id(
+        binding_key="bridge-secret",
+        content=None,
+        tool_calls=original,
+        index=0,
+        data="c2VjcmV0",
+    )
+
+    assert not reasoning_binding_is_valid(
+        binding_key="bridge-secret",
+        content=None,
+        tool_calls=(
+            ToolCall(
+                call_id="call_1",
+                name="lookup",
+                arguments='{"amount":9007199254740993.0}',
+            ),
+        ),
+        index=0,
+        data="c2VjcmV0",
+        binding_id=binding_id,
+    )
+
+
+@pytest.mark.parametrize(
+    ("original_arguments", "replayed_arguments", "expected_valid"),
+    [
+        ('{"value":1}', '{"value":1.0}', False),
+        ('{"value":1e0}', '{"value":1.0}', True),
+        ('{"value":-0}', '{"value":0}', True),
+        ('{"value":-0.0}', '{"value":0.0}', False),
+        ('{"value":true}', '{"value":1}', False),
+        ('{"value":1e-999}', '{"value":0.0}', False),
+        (
+            '{"value":{"b":[1e0],"a":null}}',
+            '{ "value": { "a": null, "b": [1.0] } }',
+            True,
+        ),
+    ],
+)
+def test_reasoning_binding_matches_honcho_json_number_normalization_without_type_loss(
+    original_arguments: str,
+    replayed_arguments: str,
+    expected_valid: bool,
+) -> None:
+    binding_id = create_reasoning_binding_id(
+        binding_key="bridge-secret",
+        content=None,
+        tool_calls=(ToolCall("call_1", "lookup", original_arguments),),
+        index=0,
+        data="c2VjcmV0",
+    )
+
+    assert (
+        reasoning_binding_is_valid(
+            binding_key="bridge-secret",
+            content=None,
+            tool_calls=(ToolCall("call_1", "lookup", replayed_arguments),),
+            index=0,
+            data="c2VjcmV0",
+            binding_id=binding_id,
+        )
+        is expected_valid
+    )
+
+
 def test_parses_exact_bound_reasoning_details_on_assistant_only() -> None:
     detail = _reasoning_detail(content="visible")
 
