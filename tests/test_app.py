@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import pytest
 from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from openai.types.chat import ChatCompletion
 
 import codex_openai_bridge.app as app_module
@@ -468,18 +468,28 @@ async def test_stream_write_cancellation_propagates_and_closes_once(
             raise asyncio.CancelledError
 
     monkeypatch.setattr(web, "StreamResponse", CancellingResponse)
-    request = cast(Any, SimpleNamespace(app=app))
+    request = make_mocked_request(
+        "POST",
+        "/v1/chat/completions",
+        headers=AUTH,
+        app=app,
+    )
 
-    with pytest.raises(asyncio.CancelledError):
-        await app_module._stream_chat_completion(
-            request,
+    async def stream_handler(stream_request: web.Request) -> web.StreamResponse:
+        return await app_module._stream_chat_completion(
+            stream_request,
             credential=_credential(),
             payload={"model": "server-model", "stream": True},
             include_usage=False,
             deadline=time.monotonic() + 1,
         )
 
+    with pytest.raises(asyncio.CancelledError):
+        await app_module._admission_middleware(request, stream_handler)
+
     assert upstream.stream.close_calls == 1
+    assert app[app_module._ADMISSION_KEY].active_count == 0
+    assert app[app_module._ADMISSION_KEY].waiting_count == 0
 
 
 @pytest.mark.asyncio

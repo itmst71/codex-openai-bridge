@@ -12,6 +12,12 @@ from typing import Protocol, cast
 from aiohttp import hdrs, web
 from aiohttp.http import HttpVersion11
 
+from codex_openai_bridge.admission import (
+    AdmissionController,
+    AdmissionLease,
+    AdmissionQueueTimeout,
+    AdmissionShuttingDown,
+)
 from codex_openai_bridge.auth import Credential
 from codex_openai_bridge.config import Settings
 from codex_openai_bridge.errors import openai_error_response
@@ -55,11 +61,14 @@ _TOKEN_KEY = web.AppKey("bridge_token", str)
 _CREDENTIAL_PROVIDER_KEY = web.AppKey("credential_provider", CredentialProvider)
 _SETTINGS_KEY = web.AppKey("settings", Settings)
 _UPSTREAM_KEY = web.AppKey("upstream", object)
+_ADMISSION_KEY = web.AppKey("admission", AdmissionController)
 _CANONICAL_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _READINESS_EXPIRY_SKEW_SECONDS = 60
 _REQUEST_ID_BYTES = 16
 _REQUEST_ID_HEADER = "X-Request-ID"
 _REQUEST_ID_KEY = web.RequestKey("request_id", str)
+_ADMISSION_LEASE_KEY = web.RequestKey("admission_lease", AdmissionLease)
+_GENERATION_PATHS = frozenset({"/v1/chat/completions", "/v1/responses"})
 
 
 def _assign_request_id(request: web.Request) -> str:
@@ -134,13 +143,29 @@ async def _protected_expect_handler(request: web.Request) -> web.StreamResponse 
         response = _json_boundary_response(error)
         response.headers[_REQUEST_ID_HEADER] = _assign_request_id(request)
         return response
+    if request.version != HttpVersion11:
+        return None
     expect_values = request.headers.getall(hdrs.EXPECT, [])
-    if request.version == HttpVersion11:
-        if len(expect_values) == 1 and expect_values[0].lower() == "100-continue":
-            await request.writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
-            request.writer.output_size = 0
-        else:
-            raise web.HTTPExpectationFailed(text="Unsupported expectation")
+    if len(expect_values) != 1 or expect_values[0].lower() != "100-continue":
+        raise web.HTTPExpectationFailed(text="Unsupported expectation")
+    try:
+        lease = await request.app[_ADMISSION_KEY].acquire()
+    except AdmissionQueueTimeout:
+        response = _queue_timeout_response()
+        response.headers[_REQUEST_ID_HEADER] = _assign_request_id(request)
+        return response
+    except AdmissionShuttingDown:
+        response = _shutdown_response()
+        response.headers[_REQUEST_ID_HEADER] = _assign_request_id(request)
+        return response
+    request[_ADMISSION_LEASE_KEY] = lease
+    try:
+        await request.writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+        request.writer.output_size = 0
+    except BaseException:
+        lease.release()
+        del request[_ADMISSION_LEASE_KEY]
+        raise
     return None
 
 
@@ -158,6 +183,52 @@ async def _client_auth_middleware(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return await handler(request)
+
+
+def _queue_timeout_response() -> web.Response:
+    return openai_error_response(
+        status=429,
+        message="Too many requests",
+        error_type="rate_limit_error",
+        code="bridge_queue_timeout",
+    )
+
+
+def _shutdown_response() -> web.Response:
+    return openai_error_response(
+        status=503,
+        message="Service unavailable",
+        error_type="server_error",
+        code="bridge_shutting_down",
+    )
+
+
+def _is_generation_request(request: web.Request) -> bool:
+    return request.method == hdrs.METH_POST and request.path in _GENERATION_PATHS
+
+
+@web.middleware
+async def _admission_middleware(
+    request: web.Request,
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+) -> web.StreamResponse:
+    if not _is_generation_request(request):
+        return await handler(request)
+    lease = request.get(_ADMISSION_LEASE_KEY)
+    if lease is None:
+        try:
+            lease = await request.app[_ADMISSION_KEY].acquire()
+        except AdmissionQueueTimeout:
+            return _queue_timeout_response()
+        except AdmissionShuttingDown:
+            return _shutdown_response()
+        request[_ADMISSION_LEASE_KEY] = lease
+    try:
+        return await handler(request)
+    finally:
+        lease.release()
+        if request.get(_ADMISSION_LEASE_KEY) is lease:
+            del request[_ADMISSION_LEASE_KEY]
 
 
 async def _healthz(_request: web.Request) -> web.Response:
@@ -544,12 +615,22 @@ def create_app(
 ) -> web.Application:
     """Create the loopback bridge application with startup-loaded client auth."""
     app = web.Application(
-        middlewares=[_request_id_middleware, _client_auth_middleware],
+        middlewares=[_request_id_middleware, _client_auth_middleware, _admission_middleware],
         client_max_size=settings.max_request_body_bytes,
     )
     app[_TOKEN_KEY] = load_bridge_token(settings.client_token_file)
     app[_CREDENTIAL_PROVIDER_KEY] = credential_provider
     app[_SETTINGS_KEY] = settings
+    app[_ADMISSION_KEY] = AdmissionController(
+        max_in_flight=settings.max_in_flight,
+        queue_wait_seconds=settings.queue_wait_seconds,
+    )
+
+    async def shutdown_admission(application: web.Application) -> None:
+        await application[_ADMISSION_KEY].shutdown()
+
+    app.on_shutdown.append(shutdown_admission)
+    app.on_cleanup.append(shutdown_admission)
     if upstream is None:
 
         async def refresh_credentials() -> Credential:
