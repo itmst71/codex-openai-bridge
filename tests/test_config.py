@@ -102,8 +102,8 @@ def test_default_paths_are_absolute_and_fixed() -> None:
         settings.helper_path
         == Path(config_module.__file__).with_name("hermes_credential_helper.py").resolve()
     )
-    assert settings.client_token_file == Path(
-        "/home/itmst/.config/codex-openai-bridge/client-token"
+    assert settings.client_token_file == (
+        Path.home() / ".config" / "codex-openai-bridge" / "client-token"
     )
     assert settings.hermes_python_path.is_absolute()
     assert settings.helper_path.is_absolute()
