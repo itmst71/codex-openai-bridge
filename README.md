@@ -1,5 +1,9 @@
 # codex-openai-bridge
 
+[![CI](https://github.com/itmst71/codex-openai-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/itmst71/codex-openai-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/downloads/)
+
 A bounded, loopback-only OpenAI-compatible HTTP bridge for the Codex Responses backend. It lets consumers such as the OpenAI Python SDK and Honcho use a stable public model alias (`codex`) while keeping the upstream URL, OAuth authorization, account ID, and real model under server control.
 
 This project is an independent translation service. It does **not** run the Hermes agent loop, system prompt, memory, or tools.
@@ -262,3 +266,13 @@ unset CODEX_BRIDGE_BASE_URL CODEX_BRIDGE_CLIENT_TOKEN
 ```
 
 Never include credential values in bug reports, test logs, shell transcripts, or review prompts.
+
+## Security
+
+Review the loopback-only threat model above before deployment. Report vulnerabilities using
+the process in [SECURITY.md](SECURITY.md), and never place credentials or sensitive request
+data in a public issue.
+
+## License
+
+Licensed under the [MIT License](LICENSE).

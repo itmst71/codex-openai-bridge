@@ -6,12 +6,31 @@ build-backend = "hatchling.build"
 name = "codex-openai-bridge"
 version = "0.1.0"
 description = "Bounded OpenAI-compatible bridge for the Codex Responses backend"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "itmst71" },
+]
+keywords = ["codex", "openai", "oauth", "responses-api", "bridge"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+]
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "aiohttp>=3.12,<4",
   "httpx>=0.28,<1",
   "pydantic>=2.11,<3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/itmst71/codex-openai-bridge"
+Repository = "https://github.com/itmst71/codex-openai-bridge.git"
+Issues = "https://github.com/itmst71/codex-openai-bridge/issues"
 
 [project.scripts]
 codex-openai-bridge = "codex_openai_bridge.cli:main"
