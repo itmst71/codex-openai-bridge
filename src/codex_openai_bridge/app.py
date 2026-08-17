@@ -28,11 +28,13 @@ from codex_openai_bridge.json_boundary import (
     validate_json_request_headers,
 )
 from codex_openai_bridge.responses import (
+    ResponsesRequest,
     ResponsesRequestError,
     parse_responses_request,
     responses_request_to_upstream,
     responses_to_public,
 )
+from codex_openai_bridge.responses_stream import ResponsesSseTranslator
 from codex_openai_bridge.security import bearer_is_authorized, load_bridge_token
 from codex_openai_bridge.translation import (
     UpstreamResponseError,
@@ -352,23 +354,39 @@ async def _write_stream_frame(
     frame: bytes,
     *,
     deadline: float,
+    on_written: Callable[[], None] | None = None,
 ) -> None:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError
     async with asyncio.timeout(remaining):
         await response.write(frame)
+    if on_written is not None:
+        on_written()
     if time.monotonic() > deadline:
         raise TimeoutError
 
 
-async def _stream_chat_completion(
+class _StreamTranslation:
+    def __init__(
+        self,
+        frames: AsyncIterator[bytes],
+        terminal_error_frame: Callable[[], bytes],
+        is_success_terminal_frame: Callable[[bytes], bool] | None = None,
+    ) -> None:
+        self.frames = frames
+        self.terminal_error_frame = terminal_error_frame
+        self.is_success_terminal_frame = is_success_terminal_frame or (lambda _frame: False)
+
+
+async def _stream_bounded_sse(
     request: web.Request,
     *,
     credential: Credential,
     payload: dict[str, object],
-    include_usage: bool,
     deadline: float,
+    translate: Callable[[AsyncIterator[bytes]], _StreamTranslation],
+    prepare_timeout_is_upstream: bool,
     request_id: str | None = None,
 ) -> web.StreamResponse:
     settings = request.app[_SETTINGS_KEY]
@@ -384,7 +402,7 @@ async def _stream_chat_completion(
         raise UpstreamError(UpstreamErrorKind.TIMEOUT)
     upstream = cast(StreamingResponsesUpstream, request.app[_UPSTREAM_KEY])
     stream: ResponsesByteStream | None = None
-    translated: AsyncIterator[bytes] | None = None
+    translated: _StreamTranslation | None = None
     prefetched = False
     try:
         stream_result = await _with_deadline(
@@ -392,17 +410,8 @@ async def _stream_chat_completion(
             deadline=body_deadline,
         )
         stream = cast(ResponsesByteStream, stream_result)
-        translated = translate_responses_sse(
-            stream.__aiter__(),
-            public_model=settings.public_model,
-            include_usage=include_usage,
-            max_sse_event_bytes=settings.max_sse_event_bytes,
-            max_stream_bytes=settings.max_stream_bytes,
-            max_json_depth=settings.max_json_depth,
-            max_json_nodes=settings.max_json_nodes,
-            max_string_bytes=settings.max_string_bytes,
-        )
-        first_result = await _with_deadline(anext(translated), deadline=body_deadline)
+        translated = translate(stream.__aiter__())
+        first_result = await _with_deadline(anext(translated.frames), deadline=body_deadline)
         first_frame = cast(bytes, first_result)
         prefetched = True
     except UpstreamError:
@@ -427,20 +436,52 @@ async def _stream_chat_completion(
         response_headers[_REQUEST_ID_HEADER] = request_id
     response = web.StreamResponse(status=200, headers=response_headers)
     response_prepared = False
+    success_terminal_written = False
+
+    def mark_success_terminal_written() -> None:
+        nonlocal success_terminal_written
+        success_terminal_written = True
+
     try:
-        await _with_deadline(response.prepare(request), deadline=body_deadline)
+        try:
+            await _with_deadline(response.prepare(request), deadline=body_deadline)
+        except TimeoutError:
+            if prepare_timeout_is_upstream:
+                raise UpstreamError(UpstreamErrorKind.TIMEOUT) from None
+            raise
         response_prepared = True
         try:
-            await _write_stream_frame(response, first_frame, deadline=body_deadline)
             assert translated is not None
+            first_is_success_terminal = translated.is_success_terminal_frame(first_frame)
+            await _write_stream_frame(
+                response,
+                first_frame,
+                deadline=body_deadline,
+                on_written=(mark_success_terminal_written if first_is_success_terminal else None),
+            )
             while True:
-                next_result = await _with_deadline(anext(translated), deadline=body_deadline)
+                next_result = await _with_deadline(
+                    anext(translated.frames),
+                    deadline=body_deadline,
+                )
                 frame = cast(bytes, next_result)
-                await _write_stream_frame(response, frame, deadline=body_deadline)
+                is_success_terminal = translated.is_success_terminal_frame(frame)
+                await _write_stream_frame(
+                    response,
+                    frame,
+                    deadline=body_deadline,
+                    on_written=(mark_success_terminal_written if is_success_terminal else None),
+                )
         except StopAsyncIteration:
             pass
         except (UpstreamError, UpstreamResponseError, TimeoutError):
-            await _write_stream_frame(response, _STREAM_ERROR_FRAME, deadline=deadline)
+            if not success_terminal_written:
+                assert translated is not None
+                await _write_stream_frame(
+                    response,
+                    translated.terminal_error_frame(),
+                    deadline=deadline,
+                )
     finally:
         assert stream is not None
         if response_prepared:
@@ -448,6 +489,82 @@ async def _stream_chat_completion(
         else:
             await _close_stream_preserving_primary(stream)
     return response
+
+
+async def _stream_chat_completion(
+    request: web.Request,
+    *,
+    credential: Credential,
+    payload: dict[str, object],
+    include_usage: bool,
+    deadline: float,
+    request_id: str | None = None,
+) -> web.StreamResponse:
+    settings = request.app[_SETTINGS_KEY]
+
+    def create_translation(chunks: AsyncIterator[bytes]) -> _StreamTranslation:
+        frames = translate_responses_sse(
+            chunks,
+            public_model=settings.public_model,
+            include_usage=include_usage,
+            max_sse_event_bytes=settings.max_sse_event_bytes,
+            max_stream_bytes=settings.max_stream_bytes,
+            max_json_depth=settings.max_json_depth,
+            max_json_nodes=settings.max_json_nodes,
+            max_string_bytes=settings.max_string_bytes,
+        )
+        return _StreamTranslation(frames, lambda: _STREAM_ERROR_FRAME)
+
+    return await _stream_bounded_sse(
+        request,
+        credential=credential,
+        payload=payload,
+        deadline=deadline,
+        translate=create_translation,
+        prepare_timeout_is_upstream=False,
+        request_id=request_id,
+    )
+
+
+async def _stream_responses_response(
+    request: web.Request,
+    *,
+    credential: Credential,
+    payload: dict[str, object],
+    responses_request: ResponsesRequest,
+    deadline: float,
+    request_id: str | None = None,
+) -> web.StreamResponse:
+    settings = request.app[_SETTINGS_KEY]
+
+    def create_translation(chunks: AsyncIterator[bytes]) -> _StreamTranslation:
+        translator = ResponsesSseTranslator(
+            chunks,
+            request=responses_request,
+            public_model=settings.public_model,
+            max_items=settings.max_messages,
+            max_tools=settings.max_tools,
+            max_sse_event_bytes=settings.max_sse_event_bytes,
+            max_stream_bytes=settings.max_stream_bytes,
+            max_json_depth=settings.max_json_depth,
+            max_json_nodes=settings.max_json_nodes,
+            max_string_bytes=settings.max_string_bytes,
+        )
+        return _StreamTranslation(
+            translator,
+            translator.terminal_error_frame,
+            lambda frame: frame.startswith(b"event: response.completed\n"),
+        )
+
+    return await _stream_bounded_sse(
+        request,
+        credential=credential,
+        payload=payload,
+        deadline=deadline,
+        translate=create_translation,
+        prepare_timeout_is_upstream=True,
+        request_id=request_id,
+    )
 
 
 async def _chat_completions(request: web.Request) -> web.Response:
@@ -580,6 +697,23 @@ async def _responses(request: web.Request) -> web.Response:
         return _upstream_error_response(UpstreamError(UpstreamErrorKind.TIMEOUT))
     except Exception:
         return _credentials_error_response()
+    if responses_request.stream:
+        try:
+            return cast(
+                web.Response,
+                await _stream_responses_response(
+                    request,
+                    credential=credential,
+                    payload=payload,
+                    responses_request=responses_request,
+                    deadline=deadline,
+                    request_id=_response_request_id(request),
+                ),
+            )
+        except UpstreamError as error:
+            return _upstream_error_response(error)
+        except UpstreamResponseError:
+            return _service_error_response()
     try:
         upstream = cast(ResponsesUpstream, request.app[_UPSTREAM_KEY])
         upstream_response = await _with_deadline(

@@ -1,4 +1,4 @@
-"""Strict non-streaming Responses request and response boundary."""
+"""Strict Responses request and non-streaming response boundary."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ class ResponsesRequestError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ResponsesRequest:
-    """The closed public non-streaming Responses request contract."""
+    """The closed public Responses request contract."""
 
     input: str | tuple[dict[str, Any], ...]
     instructions: str | None
@@ -38,6 +38,10 @@ class ResponsesRequest:
     tool_choice: Literal["auto", "required", "none"] | NamedFunctionToolChoice | None
     parallel_tool_calls: bool | None
     response_format: JsonObjectResponseFormat | JsonSchemaResponseFormat | None
+    stream: bool
+    historical_item_ids: frozenset[str]
+    historical_call_ids: frozenset[str]
+    historical_reasoning_digests: frozenset[bytes]
 
 
 def _invalid_request() -> ResponsesRequestError:
@@ -264,9 +268,14 @@ def _parse_input(
     max_json_depth: int,
     max_json_nodes: int,
     max_string_bytes: int,
-) -> str | tuple[dict[str, Any], ...]:
+) -> tuple[
+    str | tuple[dict[str, Any], ...],
+    frozenset[str],
+    frozenset[str],
+    frozenset[bytes],
+]:
     if type(value) is str:
-        return value
+        return value, frozenset(), frozenset(), frozenset()
     if type(value) is not list or not 1 <= len(value) <= max_items:
         raise _invalid_request()
     translated: list[dict[str, Any]] = []
@@ -445,7 +454,12 @@ def _parse_input(
         raise _invalid_request()
     if pending_call_ids:
         raise _invalid_request()
-    return tuple(translated)
+    return (
+        tuple(translated),
+        frozenset(item_ids),
+        frozenset(call_ids),
+        frozenset(reasoning_digests),
+    )
 
 
 def parse_responses_request(
@@ -501,14 +515,20 @@ def parse_responses_request(
         raise _invalid_request()
     if "store" in document and document["store"] is not False:
         raise _invalid_request()
-    if "stream" in document and document["stream"] is not False:
+    stream = document.get("stream", False)
+    if type(stream) is not bool:
         raise _invalid_request()
     if "include" in document and document["include"] != ["reasoning.encrypted_content"]:
         raise _invalid_request()
     instructions = document.get("instructions")
     if "instructions" in document and type(instructions) is not str:
         raise _invalid_request()
-    parsed_input = _parse_input(
+    (
+        parsed_input,
+        historical_item_ids,
+        historical_call_ids,
+        historical_reasoning_digests,
+    ) = _parse_input(
         document["input"],
         max_items=max_items,
         max_tools=max_tools,
@@ -532,6 +552,10 @@ def parse_responses_request(
         tool_choice=tool_choice,
         parallel_tool_calls=parallel_tool_calls,
         response_format=response_format,
+        stream=stream,
+        historical_item_ids=historical_item_ids,
+        historical_call_ids=historical_call_ids,
+        historical_reasoning_digests=historical_reasoning_digests,
     )
 
 
@@ -585,7 +609,7 @@ def responses_request_to_upstream(
         "model": upstream_model,
         "input": request.input if type(request.input) is str else deepcopy(list(request.input)),
         "store": False,
-        "stream": False,
+        "stream": request.stream,
         "include": ["reasoning.encrypted_content"],
     }
     if request.instructions is not None:
@@ -603,6 +627,54 @@ def responses_request_to_upstream(
     if text is not None:
         payload["text"] = text
     return payload
+
+
+def responses_public_snapshot(
+    request: ResponsesRequest,
+    *,
+    response_id: object,
+    created_at: object,
+    public_model: str,
+) -> dict[str, Any]:
+    """Build the closed public in-progress snapshot used by Responses SSE."""
+    response_id = _identifier(response_id, upstream=True)
+    if (
+        type(created_at) is not int
+        or created_at < 0
+        or type(public_model) is not str
+        or not public_model
+    ):
+        raise UpstreamResponseError("invalid upstream response")
+    tools = [_tool_payload(tool) for tool in request.tools]
+    choice = _tool_choice_payload(request.tool_choice)
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "status": "in_progress",
+        "error": None,
+        "incomplete_details": None,
+        "model": public_model,
+        "output": [],
+        "parallel_tool_calls": (
+            request.parallel_tool_calls if request.parallel_tool_calls is not None else True
+        ),
+        "tool_choice": choice if choice is not None else "auto",
+        "tools": tools,
+        "usage": None,
+    }
+
+
+def validate_encrypted_reasoning_content(value: object, *, max_string_bytes: int) -> str:
+    """Validate one canonical opaque reasoning payload for public SSE projection."""
+    _canonical_reasoning_digest(value, max_string_bytes=max_string_bytes, upstream=True)
+    assert type(value) is str
+    return value
+
+
+def validate_responses_identifier(value: object) -> str:
+    """Validate one upstream identifier before it enters a public SSE frame."""
+    return _identifier(value, upstream=True)
 
 
 def _usage_detail(value: object, field: str) -> int:
@@ -651,6 +723,8 @@ def responses_to_public(
     )
     response: dict[str, Any] = value
     response_id = _identifier(response.get("id"), upstream=True)
+    if response_id in request.historical_item_ids:
+        raise UpstreamResponseError("invalid upstream response")
     created_at = response.get("created_at")
     output = response.get("output")
     usage = response.get("usage")
@@ -674,24 +748,9 @@ def responses_to_public(
         if isinstance(request.tool_choice, NamedFunctionToolChoice)
         else None
     )
-    item_ids: set[str] = {response_id}
-    call_ids: set[str] = set()
-    reasoning_digests: set[bytes] = set()
-    if type(request.input) is tuple:
-        for historical_item in request.input:
-            if type(historical_item) is not dict:
-                raise UpstreamResponseError("invalid upstream response")
-            historical_type = historical_item.get("type")
-            if historical_type == "function_call":
-                call_ids.add(_identifier(historical_item.get("call_id"), upstream=True))
-            elif historical_type == "reasoning":
-                reasoning_digests.add(
-                    _canonical_reasoning_digest(
-                        historical_item.get("encrypted_content"),
-                        max_string_bytes=max_string_bytes,
-                        upstream=True,
-                    )
-                )
+    item_ids: set[str] = {response_id, *request.historical_item_ids}
+    call_ids: set[str] = set(request.historical_call_ids)
+    reasoning_digests: set[bytes] = set(request.historical_reasoning_digests)
     reasoning_count = 0
     function_count = 0
     message_count = 0

@@ -819,6 +819,36 @@ class _ResponsesStreamTranslator:
         return ()
 
 
+class ResponsesStreamValidator:
+    """Narrow reusable validator for one strict Responses event stream."""
+
+    def __init__(
+        self,
+        *,
+        public_model: str,
+        max_unknown_events: int,
+        max_string_bytes: int,
+    ) -> None:
+        self._translator = _ResponsesStreamTranslator(
+            public_model=public_model,
+            include_usage=False,
+            max_unknown_events=max_unknown_events,
+            max_string_bytes=max_string_bytes,
+        )
+
+    def feed(self, event: ParsedSseEvent) -> None:
+        """Validate an event while deliberately discarding Chat wire frames."""
+        self._translator.feed(event)
+
+    @property
+    def saw_done(self) -> bool:
+        return self._translator.saw_done
+
+    @property
+    def last_sequence(self) -> int | None:
+        return self._translator.last_sequence
+
+
 async def translate_responses_sse(
     chunks: AsyncIterator[bytes],
     *,

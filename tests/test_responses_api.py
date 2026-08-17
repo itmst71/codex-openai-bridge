@@ -185,24 +185,6 @@ async def test_authenticated_nonstream_string_response_is_reconstructed_and_sdk_
 
 
 @pytest.mark.asyncio
-async def test_stream_true_is_rejected_before_credentials(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = create_app(_settings(tmp_path), NeverCredentialManager(), upstream=FakeUpstream([]))
-
-    async def read_document(_request: Any, **_kwargs: Any) -> object:
-        return {"model": "codex", "input": "hello", "stream": True}
-
-    monkeypatch.setattr(app_module, "read_json_request", read_document)
-    response = await app_module._responses(cast(Any, SimpleNamespace(app=app)))
-    assert isinstance(response.body, (bytes, bytearray))
-    body = json.loads(response.body)
-
-    assert response.status == 400
-    assert body["error"]["code"] == "invalid_request"
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "document",
@@ -405,7 +387,6 @@ def test_direct_responses_reasoning_accepts_strict_base64_variants(data: str) ->
         {"model": "codex", "input": "x", "account_id": "secret"},
         {"model": "codex", "input": "x", "store": True},
         {"model": "codex", "input": "x", "store": 0},
-        {"model": "codex", "input": "x", "stream": True},
         {"model": "codex", "input": "x", "stream": 0},
         {"model": "codex", "input": "x", "include": []},
         {"model": "codex", "input": "x", "include": "reasoning.encrypted_content"},
@@ -790,6 +771,43 @@ def test_upstream_output_must_honor_request_tool_policy(
 ) -> None:
     value = _text_response()
     value["output"] = output
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _public_response_for(document, value)
+
+
+def test_upstream_response_cannot_reuse_a_historical_reasoning_item_id() -> None:
+    document = {
+        "model": "codex",
+        "input": [
+            {
+                "id": "rs_history",
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [],
+                "encrypted_content": "YQ==",
+            },
+            {
+                "id": "msg_history",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "earlier", "annotations": []}],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+    }
+    value = _text_response()
+    value["output"].insert(
+        0,
+        {
+            "id": "rs_history",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [],
+            "encrypted_content": "Yg==",
+        },
+    )
 
     with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
         _public_response_for(document, value)
@@ -1278,7 +1296,7 @@ async def test_responses_auth_and_request_id_use_shared_middlewares(tmp_path: Pa
         assert __import__("re").fullmatch(r"[0-9a-f]{32}", response.headers["X-Request-ID"])
 
 
-def test_only_nonstream_responses_route_is_registered_and_embeddings_remain_absent(
+def test_responses_route_is_registered_and_embeddings_remain_absent(
     tmp_path: Path,
 ) -> None:
     app = create_app(_settings(tmp_path), NeverCredentialManager(), upstream=FakeUpstream([]))
