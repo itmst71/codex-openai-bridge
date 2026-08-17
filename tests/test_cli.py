@@ -37,7 +37,7 @@ def test_cli_runs_validated_application_without_touching_credentials(
     monkeypatch.setattr(web, "run_app", fake_run_app)
     monkeypatch.setattr(cli_module, "configure_logging", lambda: configured.append(True))
 
-    assert cli_module.main([]) == 0
+    assert cli_module.main(["serve"]) == 0
     assert len(calls) == 1
     assert configured == [True]
     app, kwargs = calls[0]
@@ -45,3 +45,16 @@ def test_cli_runs_validated_application_without_touching_credentials(
     assert kwargs["host"] == "127.0.0.1"
     assert kwargs["port"] == 8646
     assert kwargs["access_log"] is None
+
+
+def test_cli_rejects_unknown_subcommands_before_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "configure_logging",
+        lambda: pytest.fail("logging must not be configured"),
+    )
+
+    with pytest.raises(SystemExit, match="accepts only the optional 'serve' subcommand"):
+        cli_module.main(["status"])

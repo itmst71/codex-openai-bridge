@@ -16,8 +16,8 @@ from codex_openai_bridge.logging import configure_logging
 def main(argv: Sequence[str] | None = None) -> int:
     """Load validated settings and run the loopback aiohttp service."""
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments:
-        raise SystemExit("codex-openai-bridge does not accept arguments")
+    if arguments not in ([], ["serve"]):
+        raise SystemExit("codex-openai-bridge accepts only the optional 'serve' subcommand")
     configure_logging()
     settings = Settings.from_env()
     app = create_app(settings, CredentialManager(settings))

@@ -1,0 +1,22 @@
+[Unit]
+Description=Loopback OpenAI-compatible bridge for Codex OAuth
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/itmst/src/codex-openai-bridge
+ExecStart=/home/itmst/src/codex-openai-bridge/.venv/bin/codex-openai-bridge serve
+Environment=CODEX_BRIDGE_HOST=127.0.0.1 PYTHONPATH=
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/itmst/.hermes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=default.target
