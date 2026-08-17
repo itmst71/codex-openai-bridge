@@ -93,6 +93,29 @@ class ChatCompletionRequest:
     include_usage: bool = False
 
 
+def model_list_document(public_model: str) -> dict[str, object]:
+    """Build the stable, secret-free OpenAI model discovery document."""
+    if type(public_model) is not str or not public_model:
+        raise ValueError("invalid public model")
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": public_model,
+                "created": 0,
+                "object": "model",
+                "owned_by": "codex-openai-bridge",
+                "x_codex_bridge": {
+                    "chat_completions": True,
+                    "responses": True,
+                    "function_calling": True,
+                    "embeddings": False,
+                },
+            }
+        ],
+    }
+
+
 def _reject_json_constant(_value: str) -> None:
     raise ValueError
 

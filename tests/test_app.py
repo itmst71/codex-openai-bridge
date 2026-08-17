@@ -14,6 +14,7 @@ from typing import Any, cast
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
+from openai.types import Model
 from openai.types.chat import ChatCompletion
 
 import codex_openai_bridge.app as app_module
@@ -2199,3 +2200,48 @@ async def test_missing_bearer_is_rejected_before_oversized_body_read(tmp_path: P
 
     assert response.status == 401
     assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+@pytest.mark.asyncio
+async def test_models_requires_auth_and_returns_stable_secret_free_capabilities(
+    tmp_path: Path,
+) -> None:
+    settings = replace(_settings(tmp_path), upstream_model="SENSITIVE_PRIVATE_MODEL")
+    upstream = FakeUpstream({})
+    app = create_app(settings, NeverCredentialManager(), upstream=upstream)
+
+    async with TestClient(TestServer(app)) as client:
+        unauthorized = await client.get("/v1/models")
+        authorized = await client.get("/v1/models", headers=AUTH)
+        unauthorized_body = await unauthorized.json()
+        authorized_body = await authorized.json()
+
+    assert unauthorized.status == 401
+    assert unauthorized_body["error"]["code"] == "invalid_api_key"
+    assert re.fullmatch(r"[0-9a-f]{32}", unauthorized.headers["X-Request-ID"])
+    assert authorized.status == 200
+    assert re.fullmatch(r"[0-9a-f]{32}", authorized.headers["X-Request-ID"])
+    assert authorized_body == {
+        "object": "list",
+        "data": [
+            {
+                "id": "codex",
+                "created": 0,
+                "object": "model",
+                "owned_by": "codex-openai-bridge",
+                "x_codex_bridge": {
+                    "chat_completions": True,
+                    "responses": True,
+                    "function_calling": True,
+                    "embeddings": False,
+                },
+            }
+        ],
+    }
+    parsed = Model.model_validate(authorized_body["data"][0])
+    assert parsed.id == "codex"
+    assert parsed.model_extra == {"x_codex_bridge": authorized_body["data"][0]["x_codex_bridge"]}
+    serialized = json.dumps(authorized_body, sort_keys=True)
+    assert TOKEN not in serialized
+    assert settings.upstream_model not in serialized
+    assert upstream.calls == []

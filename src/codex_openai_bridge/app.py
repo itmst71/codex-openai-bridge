@@ -50,7 +50,11 @@ from codex_openai_bridge.upstream import (
     UpstreamError,
     UpstreamErrorKind,
 )
-from codex_openai_bridge.wire import ChatRequestError, parse_chat_completion_request
+from codex_openai_bridge.wire import (
+    ChatRequestError,
+    model_list_document,
+    parse_chat_completion_request,
+)
 
 
 class CredentialProvider(Protocol):
@@ -235,6 +239,10 @@ async def _admission_middleware(
 
 async def _healthz(_request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
+
+
+async def _models(request: web.Request) -> web.Response:
+    return web.json_response(model_list_document(request.app[_SETTINGS_KEY].public_model))
 
 
 def _credential_is_ready(value: object, *, now: float) -> bool:
@@ -784,6 +792,7 @@ def create_app(
         app[_UPSTREAM_KEY] = upstream
     app.router.add_get("/healthz", _healthz)
     app.router.add_get("/readyz", _readyz)
+    app.router.add_get("/v1/models", _models)
     app.router.add_post(
         "/v1/chat/completions",
         _chat_completions,
