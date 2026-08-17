@@ -48,4 +48,4 @@ jobs:
         run: uv run python -m compileall -q src tests scripts
 
       - name: Verify systemd user unit
-        run: systemd-analyze --user verify deploy/systemd/codex-openai-bridge.service
+        run: uv run python scripts/verify_systemd_unit.py
