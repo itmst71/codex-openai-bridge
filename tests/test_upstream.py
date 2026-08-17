@@ -15,6 +15,7 @@ from codex_openai_bridge.auth import Credential
 from codex_openai_bridge.config import Settings
 from codex_openai_bridge.upstream import (
     HttpxResponsesUpstream,
+    ResponsesByteStream,
     UpstreamError,
     UpstreamErrorKind,
 )
@@ -59,6 +60,161 @@ class _TrackingStream(httpx.AsyncByteStream):
         self.close_calls += 1
         if self._close_failure is not None:
             raise self._close_failure
+
+
+async def _collect_stream(stream: ResponsesByteStream) -> list[bytes]:
+    return [chunk async for chunk in stream]
+
+
+@pytest.mark.asyncio
+async def test_stream_posts_once_with_forced_invariants_and_owned_close() -> None:
+    body = _TrackingStream([b"data: one\n\n", b"data: two\n\n"])
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=body)
+
+    upstream = HttpxResponsesUpstream(Settings.from_env(), transport=httpx.MockTransport(handler))
+    try:
+        stream = await upstream.create_stream(
+            _credential(),
+            {"model": "server-model", "stream": False, "store": True, "include": []},
+        )
+        assert await _collect_stream(stream) == [b"data: one\n\n", b"data: two\n\n"]
+        await stream.aclose()
+        await stream.aclose()
+    finally:
+        await upstream.aclose()
+
+    assert len(requests) == 1
+    assert json.loads(requests[0].content) == {
+        "model": "server-model",
+        "stream": True,
+        "store": False,
+        "include": ["reasoning.encrypted_content"],
+    }
+    assert requests[0].headers["Accept"] == "text/event-stream"
+    assert body.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_duplicate_charset_parameters_before_body_use() -> None:
+    body = _TrackingStream([b"data: [DONE]\n\n"])
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream; charset=utf-8; charset=utf-8"},
+            stream=body,
+        )
+
+    upstream = HttpxResponsesUpstream(Settings.from_env(), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(UpstreamError, match=r"^upstream request failed$"):
+            await upstream.create_stream(_credential(), {})
+    finally:
+        await upstream.aclose()
+
+    assert body.iteration_starts == 0
+    assert body.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_interruption_is_sanitized_closed_and_never_retried() -> None:
+    body = _TrackingStream(
+        [b"data: partial"], failure=httpx.ReadError("SENSITIVE_STREAM_INTERRUPTION")
+    )
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=body)
+
+    upstream = HttpxResponsesUpstream(Settings.from_env(), transport=httpx.MockTransport(handler))
+    caught: UpstreamError | None = None
+    try:
+        stream = await upstream.create_stream(_credential(), {})
+        with pytest.raises(UpstreamError) as info:
+            await _collect_stream(stream)
+        caught = info.value
+    finally:
+        await upstream.aclose()
+
+    assert calls == 1
+    assert body.close_calls == 1
+    assert caught is not None
+    assert caught.kind is UpstreamErrorKind.TIMEOUT
+    assert "SENSITIVE" not in repr(caught)
+
+
+@pytest.mark.asyncio
+async def test_stream_idle_deadline_closes_without_retry() -> None:
+    release = asyncio.Event()
+    waiting = asyncio.Event()
+    body = _TrackingStream([], wait_after_chunks=release, waiting=waiting)
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=body)
+
+    settings = replace(
+        Settings.from_env(),
+        stream_idle_timeout_seconds=0.01,
+        total_request_deadline_seconds=1.0,
+    )
+    upstream = HttpxResponsesUpstream(settings, transport=httpx.MockTransport(handler))
+    try:
+        stream = await upstream.create_stream(_credential(), {})
+        with pytest.raises(UpstreamError) as caught:
+            await _collect_stream(stream)
+    finally:
+        await upstream.aclose()
+
+    assert waiting.is_set()
+    assert caught.value.kind is UpstreamErrorKind.TIMEOUT
+    assert calls == 1
+    assert body.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_401_refreshes_once_only_before_any_body_is_consumed() -> None:
+    unauthorized = _TrackingStream([b"SENSITIVE_401_BODY"])
+    success = _TrackingStream([b"data: [DONE]\n\n"])
+    calls = 0
+    refresh_calls = 0
+
+    async def refresh() -> Credential:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        return _credential(access_token="refreshed-token")
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(401, stream=unauthorized)
+        return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=success)
+
+    upstream = HttpxResponsesUpstream(
+        Settings.from_env(),
+        transport=httpx.MockTransport(handler),
+        credential_refresher=refresh,
+    )
+    try:
+        stream = await upstream.create_stream(_credential(), {})
+        assert await _collect_stream(stream) == [b"data: [DONE]\n\n"]
+    finally:
+        await upstream.aclose()
+
+    assert calls == 2
+    assert refresh_calls == 1
+    assert unauthorized.iteration_starts == 0
+    assert unauthorized.close_calls == 1
+    assert success.close_calls == 1
 
 
 def _credential(

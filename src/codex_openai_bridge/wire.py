@@ -89,6 +89,8 @@ class ChatCompletionRequest:
     tool_choice: Literal["auto", "required", "none"] | NamedFunctionToolChoice | None = None
     parallel_tool_calls: bool | None = None
     response_format: JsonObjectResponseFormat | JsonSchemaResponseFormat | None = None
+    stream: bool = False
+    include_usage: bool = False
 
 
 def _reject_json_constant(_value: str) -> None:
@@ -555,6 +557,7 @@ def parse_chat_completion_request(
         "max_tokens",
         "max_completion_tokens",
         "stream",
+        "stream_options",
         "tools",
         "tool_choice",
         "parallel_tool_calls",
@@ -766,8 +769,20 @@ def parse_chat_completion_request(
             max_string_bytes=max_string_bytes,
         )
 
-    if "stream" in document and document["stream"] is not False:
+    stream = document.get("stream", False)
+    if type(stream) is not bool:
         raise ChatRequestError("invalid request")
+    include_usage = False
+    if "stream_options" in document:
+        stream_options = document["stream_options"]
+        if (
+            stream is not True
+            or type(stream_options) is not dict
+            or set(stream_options) != {"include_usage"}
+            or type(stream_options["include_usage"]) is not bool
+        ):
+            raise ChatRequestError("invalid request")
+        include_usage = stream_options["include_usage"]
     token_fields = [name for name in ("max_tokens", "max_completion_tokens") if name in document]
     if len(token_fields) > 1:
         raise ChatRequestError("invalid request")
@@ -784,4 +799,6 @@ def parse_chat_completion_request(
         tool_choice=tool_choice,
         parallel_tool_calls=parallel_tool_calls,
         response_format=response_format,
+        stream=stream,
+        include_usage=include_usage,
     )

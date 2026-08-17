@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
+import sys
 import time
-from collections.abc import Awaitable, Callable
-from typing import Protocol
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Protocol, cast
 
 from aiohttp import hdrs, web
 from aiohttp.http import HttpVersion11
@@ -24,10 +26,13 @@ from codex_openai_bridge.translation import (
     UpstreamResponseError,
     chat_request_to_responses,
     responses_to_chat_completion,
+    translate_responses_sse,
 )
 from codex_openai_bridge.upstream import (
     HttpxResponsesUpstream,
+    ResponsesByteStream,
     ResponsesUpstream,
+    StreamingResponsesUpstream,
     UpstreamError,
     UpstreamErrorKind,
 )
@@ -43,7 +48,7 @@ class CredentialProvider(Protocol):
 _TOKEN_KEY = web.AppKey("bridge_token", str)
 _CREDENTIAL_PROVIDER_KEY = web.AppKey("credential_provider", CredentialProvider)
 _SETTINGS_KEY = web.AppKey("settings", Settings)
-_UPSTREAM_KEY = web.AppKey("upstream", ResponsesUpstream)
+_UPSTREAM_KEY = web.AppKey("upstream", object)
 _CANONICAL_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _READINESS_EXPIRY_SKEW_SECONDS = 60
 _REQUEST_ID_BYTES = 16
@@ -55,6 +60,20 @@ def _assign_request_id(request: web.Request) -> str:
     request_id = secrets.token_hex(_REQUEST_ID_BYTES)
     request[_REQUEST_ID_KEY] = request_id
     return request_id
+
+
+def _response_request_id(request: web.Request) -> str:
+    try:
+        candidate = request.get(_REQUEST_ID_KEY)
+    except (AttributeError, TypeError):
+        candidate = None
+    if (
+        type(candidate) is str
+        and len(candidate) == _REQUEST_ID_BYTES * 2
+        and all(character in "0123456789abcdef" for character in candidate)
+    ):
+        return candidate
+    return secrets.token_hex(_REQUEST_ID_BYTES)
 
 
 @web.middleware
@@ -211,16 +230,166 @@ def _upstream_error_response(error: UpstreamError) -> web.Response:
     return _service_error_response()
 
 
-async def _chat_completions(request: web.Request) -> web.Response:
-    settings = request.app[_SETTINGS_KEY]
+_STREAM_ERROR_FRAME = (
+    b'data: {"error":{"message":"Upstream stream failed","type":"server_error",'
+    b'"param":null,"code":"upstream_stream_error"}}\n\n'
+)
+
+
+async def _with_deadline(awaitable: Awaitable[object], *, deadline: float) -> object:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    async with asyncio.timeout(remaining):
+        result = await awaitable
+    if time.monotonic() > deadline:
+        raise TimeoutError
+    return result
+
+
+async def _close_stream_preserving_primary(stream: ResponsesByteStream) -> None:
+    primary_error = sys.exception()
     try:
-        document = await read_json_request(
-            request,
-            max_body_bytes=settings.max_request_body_bytes,
-            max_depth=settings.max_json_depth,
-            max_nodes=settings.max_json_nodes,
+        await stream.aclose()
+    except BaseException:
+        if primary_error is None:
+            raise
+
+
+async def _close_stream_after_prepare(stream: ResponsesByteStream) -> None:
+    primary_error = sys.exception()
+    try:
+        await stream.aclose()
+    except asyncio.CancelledError:
+        if primary_error is None:
+            raise
+    except Exception:
+        pass
+    except BaseException:
+        if primary_error is None:
+            raise
+
+
+async def _write_stream_frame(
+    response: web.StreamResponse,
+    frame: bytes,
+    *,
+    deadline: float,
+) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    async with asyncio.timeout(remaining):
+        await response.write(frame)
+    if time.monotonic() > deadline:
+        raise TimeoutError
+
+
+async def _stream_chat_completion(
+    request: web.Request,
+    *,
+    credential: Credential,
+    payload: dict[str, object],
+    include_usage: bool,
+    deadline: float,
+    request_id: str | None = None,
+) -> web.StreamResponse:
+    settings = request.app[_SETTINGS_KEY]
+    if request_id is not None and (
+        type(request_id) is not str
+        or len(request_id) != _REQUEST_ID_BYTES * 2
+        or any(character not in "0123456789abcdef" for character in request_id)
+    ):
+        raise UpstreamResponseError("invalid upstream response")
+    terminal_reserve = min(0.25, settings.total_request_deadline_seconds / 10)
+    body_deadline = deadline - terminal_reserve
+    if time.monotonic() >= body_deadline:
+        raise UpstreamError(UpstreamErrorKind.TIMEOUT)
+    upstream = cast(StreamingResponsesUpstream, request.app[_UPSTREAM_KEY])
+    stream: ResponsesByteStream | None = None
+    translated: AsyncIterator[bytes] | None = None
+    prefetched = False
+    try:
+        stream_result = await _with_deadline(
+            upstream.create_stream(credential, payload),
+            deadline=body_deadline,
+        )
+        stream = cast(ResponsesByteStream, stream_result)
+        translated = translate_responses_sse(
+            stream.__aiter__(),
+            public_model=settings.public_model,
+            include_usage=include_usage,
+            max_sse_event_bytes=settings.max_sse_event_bytes,
+            max_stream_bytes=settings.max_stream_bytes,
+            max_json_depth=settings.max_json_depth,
+            max_json_nodes=settings.max_json_nodes,
             max_string_bytes=settings.max_string_bytes,
         )
+        first_result = await _with_deadline(anext(translated), deadline=body_deadline)
+        first_frame = cast(bytes, first_result)
+        prefetched = True
+    except UpstreamError:
+        raise
+    except UpstreamResponseError:
+        raise
+    except TimeoutError:
+        raise UpstreamError(UpstreamErrorKind.TIMEOUT) from None
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise UpstreamError(UpstreamErrorKind.SERVICE) from None
+    finally:
+        if stream is not None and not prefetched:
+            await _close_stream_preserving_primary(stream)
+
+    response_headers = {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+    }
+    if request_id is not None:
+        response_headers[_REQUEST_ID_HEADER] = request_id
+    response = web.StreamResponse(status=200, headers=response_headers)
+    response_prepared = False
+    try:
+        await _with_deadline(response.prepare(request), deadline=body_deadline)
+        response_prepared = True
+        try:
+            await _write_stream_frame(response, first_frame, deadline=body_deadline)
+            assert translated is not None
+            while True:
+                next_result = await _with_deadline(anext(translated), deadline=body_deadline)
+                frame = cast(bytes, next_result)
+                await _write_stream_frame(response, frame, deadline=body_deadline)
+        except StopAsyncIteration:
+            pass
+        except (UpstreamError, UpstreamResponseError, TimeoutError):
+            await _write_stream_frame(response, _STREAM_ERROR_FRAME, deadline=deadline)
+    finally:
+        assert stream is not None
+        if response_prepared:
+            await _close_stream_after_prepare(stream)
+        else:
+            await _close_stream_preserving_primary(stream)
+    return response
+
+
+async def _chat_completions(request: web.Request) -> web.Response:
+    deadline = time.monotonic() + request.app[_SETTINGS_KEY].total_request_deadline_seconds
+    settings = request.app[_SETTINGS_KEY]
+    try:
+        document_result = await _with_deadline(
+            read_json_request(
+                request,
+                max_body_bytes=settings.max_request_body_bytes,
+                max_depth=settings.max_json_depth,
+                max_nodes=settings.max_json_nodes,
+                max_string_bytes=settings.max_string_bytes,
+            ),
+            deadline=deadline,
+        )
+        document = document_result
+    except TimeoutError:
+        return _upstream_error_response(UpstreamError(UpstreamErrorKind.TIMEOUT))
     except JsonBoundaryError as error:
         return _json_boundary_response(error)
     try:
@@ -239,11 +408,37 @@ async def _chat_completions(request: web.Request) -> web.Response:
         return _invalid_request_response()
 
     try:
-        credential = await request.app[_CREDENTIAL_PROVIDER_KEY].get_credentials()
+        credential_result = await _with_deadline(
+            request.app[_CREDENTIAL_PROVIDER_KEY].get_credentials(),
+            deadline=deadline,
+        )
+        credential = cast(Credential, credential_result)
+    except TimeoutError:
+        return _upstream_error_response(UpstreamError(UpstreamErrorKind.TIMEOUT))
     except Exception:
         return _credentials_error_response()
+    if chat_request.stream:
+        try:
+            return cast(
+                web.Response,
+                await _stream_chat_completion(
+                    request,
+                    credential=credential,
+                    payload=payload,
+                    include_usage=chat_request.include_usage,
+                    deadline=deadline,
+                    request_id=_response_request_id(request),
+                ),
+            )
+        except UpstreamError as error:
+            return _upstream_error_response(error)
+        except UpstreamResponseError:
+            return _service_error_response()
     try:
-        upstream_response = await request.app[_UPSTREAM_KEY].create_response(credential, payload)
+        upstream = cast(ResponsesUpstream, request.app[_UPSTREAM_KEY])
+        upstream_response = await _with_deadline(
+            upstream.create_response(credential, payload), deadline=deadline
+        )
         completion = responses_to_chat_completion(
             upstream_response,
             public_model=settings.public_model,
@@ -265,7 +460,7 @@ def create_app(
     settings: Settings,
     credential_provider: CredentialProvider,
     *,
-    upstream: ResponsesUpstream | None = None,
+    upstream: ResponsesUpstream | StreamingResponsesUpstream | None = None,
 ) -> web.Application:
     """Create the loopback bridge application with startup-loaded client auth."""
     app = web.Application(

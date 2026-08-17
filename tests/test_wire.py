@@ -174,6 +174,60 @@ def test_stream_may_be_absent_or_exact_false() -> None:
     )
 
     assert with_false == without_stream
+    assert without_stream.stream is False
+    assert without_stream.include_usage is False
+
+
+def test_stream_true_and_exact_include_usage_option_are_parsed() -> None:
+    request = _parse(
+        {
+            "model": "codex",
+            "messages": [{"role": "user", "content": "text"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+    )
+
+    assert request.stream is True
+    assert request.include_usage is True
+
+
+@pytest.mark.parametrize("stream", [None, 0, 1, "true", [], {}])
+def test_rejects_stream_values_other_than_exact_bool(stream: object) -> None:
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse(
+            {
+                "model": "codex",
+                "messages": [{"role": "user", "content": "text"}],
+                "stream": stream,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("stream", "stream_options"),
+    [
+        (None, {"include_usage": True}),
+        (False, {"include_usage": True}),
+        (True, None),
+        (True, {}),
+        (True, {"include_usage": None}),
+        (True, {"include_usage": 1}),
+        (True, {"include_usage": False, "extra": True}),
+    ],
+)
+def test_rejects_stream_options_outside_exact_streaming_contract(
+    stream: object, stream_options: object
+) -> None:
+    document: dict[str, object] = {
+        "model": "codex",
+        "messages": [{"role": "user", "content": "text"}],
+        "stream_options": stream_options,
+    }
+    if stream is not None:
+        document["stream"] = stream
+    with pytest.raises(ChatRequestError, match=r"^invalid request$"):
+        _parse(document)
 
 
 def test_parses_exact_json_object_response_format() -> None:
@@ -526,8 +580,8 @@ def test_parser_requires_exact_positive_schema_limits(limits: dict[str, object])
         )
 
 
-@pytest.mark.parametrize("stream", [True, 0, 1, None, "false"])
-def test_rejects_streaming_and_non_boolean_stream_values(stream: object) -> None:
+@pytest.mark.parametrize("stream", [0, 1, None, "false"])
+def test_rejects_additional_non_boolean_stream_values(stream: object) -> None:
     with pytest.raises(ChatRequestError, match=r"^invalid request$"):
         _parse(
             {

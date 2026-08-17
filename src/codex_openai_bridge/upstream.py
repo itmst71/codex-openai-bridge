@@ -7,7 +7,7 @@ import json
 import re
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from enum import Enum, auto
 from typing import Any, Protocol
 
@@ -99,6 +99,24 @@ class ResponsesUpstream(Protocol):
     ) -> object: ...
 
 
+class ResponsesByteStream(Protocol):
+    """Owned upstream byte stream; closing is explicit and idempotent."""
+
+    def __aiter__(self) -> AsyncIterator[bytes]: ...
+
+    async def aclose(self) -> None: ...
+
+
+class StreamingResponsesUpstream(Protocol):
+    """Injected streaming capability used only for stream:true requests."""
+
+    async def create_stream(
+        self,
+        credential: Credential,
+        payload: dict[str, Any],
+    ) -> ResponsesByteStream: ...
+
+
 def _credential_is_valid(credential: object) -> bool:
     return (
         type(credential) is Credential
@@ -136,7 +154,9 @@ class HttpxResponsesUpstream:
         credential_refresher: Callable[[], Awaitable[Credential]] | None = None,
     ) -> None:
         self._total_deadline = settings.total_request_deadline_seconds
+        self._stream_idle_deadline = settings.stream_idle_timeout_seconds
         self._max_body_bytes = settings.max_upstream_body_bytes
+        self._max_stream_bytes = settings.max_stream_bytes
         self._credential_refresher = credential_refresher
         self._timeout = httpx.Timeout(
             connect=settings.connect_timeout_seconds,
@@ -151,14 +171,16 @@ class HttpxResponsesUpstream:
             transport=transport,
         )
 
-    def _headers(self, credential: Credential) -> dict[str, str]:
+    def _headers(self, credential: Credential, *, streaming: bool = False) -> dict[str, str]:
         headers = {
             "Authorization": f"Bearer {credential.access_token}",
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "text/event-stream" if streaming else "application/json",
             "originator": _ORIGINATOR,
             "User-Agent": _USER_AGENT,
         }
+        if streaming:
+            headers["Accept-Encoding"] = "identity"
         if credential.account_id is not None:
             headers["ChatGPT-Account-ID"] = credential.account_id
         return headers
@@ -256,6 +278,179 @@ class HttpxResponsesUpstream:
         assert failure is not None
         raise failure
 
+    def _validate_stream_headers(self, response: httpx.Response) -> None:
+        lengths = response.headers.get_list("Content-Length")
+        if lengths and (
+            len(lengths) != 1
+            or _DECIMAL_CONTENT_LENGTH.fullmatch(lengths[0]) is None
+            or int(lengths[0]) > self._max_stream_bytes
+        ):
+            raise ValueError
+        content_types = response.headers.get_list("Content-Type")
+        if len(content_types) != 1:
+            raise ValueError
+        pieces = [piece.strip().lower() for piece in content_types[0].split(";")]
+        parameters = pieces[1:]
+        if (
+            pieces[0] != "text/event-stream"
+            or len(parameters) > 1
+            or any(
+                parameter not in {"charset=utf-8", 'charset="utf-8"'} for parameter in parameters
+            )
+        ):
+            raise ValueError
+
+    async def _stream_request_once(
+        self,
+        credential: Credential,
+        payload: dict[str, Any],
+    ) -> httpx.Response:
+        request = self._client.build_request(
+            "POST",
+            _CANONICAL_RESPONSES_URL,
+            headers=self._headers(credential, streaming=True),
+            json=payload,
+        )
+        response = await self._client.send(request, stream=True)
+        try:
+            if response.status_code == 401:
+                raise _Unauthorized
+            if response.status_code == 429:
+                raise _ResponseFailure(
+                    UpstreamErrorKind.RATE_LIMIT,
+                    retry_after=_safe_retry_after(response),
+                )
+            if not 200 <= response.status_code < 300:
+                raise _ResponseFailure(UpstreamErrorKind.SERVICE)
+            self._validate_stream_headers(response)
+        except BaseException:
+            primary_error = sys.exception()
+            try:
+                await response.aclose()
+            except BaseException:
+                if primary_error is None:
+                    raise
+            raise
+        return response
+
+    async def create_stream(
+        self,
+        credential: Credential,
+        payload: dict[str, Any],
+    ) -> ResponsesByteStream:
+        failure: UpstreamError | None = None
+        response: httpx.Response | None = None
+        try:
+            started = _monotonic()
+            deadline = started + self._total_deadline
+            async with asyncio.timeout(self._total_deadline):
+                if not _credential_is_valid(credential):
+                    raise _CredentialsUnavailable
+                if type(payload) is not dict:
+                    raise ValueError
+                streaming_payload = dict(payload)
+                streaming_payload["stream"] = True
+                streaming_payload["store"] = False
+                streaming_payload["include"] = ["reasoning.encrypted_content"]
+                try:
+                    response = await self._stream_request_once(credential, streaming_payload)
+                except _Unauthorized:
+                    if self._credential_refresher is None:
+                        raise
+                    try:
+                        refreshed = await self._credential_refresher()
+                    except Exception:
+                        raise _RefreshUnavailable from None
+                    if not _credential_is_valid(refreshed):
+                        raise _RefreshUnavailable from None
+                    response = await self._stream_request_once(refreshed, streaming_payload)
+                if _monotonic() > deadline:
+                    raise TimeoutError
+                return _HttpxResponsesByteStream(
+                    response,
+                    deadline=deadline,
+                    idle_timeout=self._stream_idle_deadline,
+                )
+        except _RefreshUnavailable:
+            failure = UpstreamError(UpstreamErrorKind.CREDENTIALS)
+        except _CredentialsUnavailable:
+            failure = UpstreamError(UpstreamErrorKind.CREDENTIALS)
+        except _ResponseFailure as error:
+            failure = UpstreamError(error.kind, retry_after=error.retry_after)
+        except (TimeoutError, httpx.TimeoutException, httpx.TransportError):
+            failure = UpstreamError(UpstreamErrorKind.TIMEOUT)
+        except Exception:
+            failure = UpstreamError(UpstreamErrorKind.SERVICE)
+        if response is not None:
+            try:
+                await response.aclose()
+            except Exception:
+                pass
+        assert failure is not None
+        raise failure
+
     async def aclose(self) -> None:
         """Close the owned HTTP client."""
         await self._client.aclose()
+
+
+class _HttpxResponsesByteStream:
+    def __init__(self, response: httpx.Response, *, deadline: float, idle_timeout: float) -> None:
+        self._response = response
+        self._iterator = response.aiter_raw().__aiter__()
+        self._deadline = deadline
+        self._idle_timeout = idle_timeout
+        self._closed = False
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self
+
+    async def _close_suppressing(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await self._response.aclose()
+        except Exception:
+            pass
+
+    async def __anext__(self) -> bytes:
+        if self._closed:
+            raise StopAsyncIteration
+        idle_deadline = _monotonic() + self._idle_timeout
+        while True:
+            remaining = min(self._deadline, idle_deadline) - _monotonic()
+            if remaining <= 0:
+                await self._close_suppressing()
+                raise UpstreamError(UpstreamErrorKind.TIMEOUT)
+            try:
+                async with asyncio.timeout(remaining):
+                    chunk = await anext(self._iterator)
+            except StopAsyncIteration:
+                await self._close_suppressing()
+                raise
+            except asyncio.CancelledError:
+                await self._close_suppressing()
+                raise
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError):
+                await self._close_suppressing()
+                raise UpstreamError(UpstreamErrorKind.TIMEOUT) from None
+            except Exception:
+                await self._close_suppressing()
+                raise UpstreamError(UpstreamErrorKind.SERVICE) from None
+            if type(chunk) is not bytes:
+                await self._close_suppressing()
+                raise UpstreamError(UpstreamErrorKind.SERVICE)
+            if chunk:
+                return chunk
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await self._response.aclose()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise UpstreamError(UpstreamErrorKind.SERVICE) from None

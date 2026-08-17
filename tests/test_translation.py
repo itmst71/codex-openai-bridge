@@ -41,6 +41,23 @@ def test_translation_forces_encrypted_reasoning_include_and_transport_invariants
     }
 
 
+def test_streaming_request_forces_responses_stream_without_changing_security_invariants() -> None:
+    request = ChatCompletionRequest(
+        messages=(ChatMessage(role="user", content="hello"),),
+        max_output_tokens=None,
+        stream=True,
+        include_usage=True,
+    )
+
+    assert chat_request_to_responses(request, upstream_model="upstream-model") == {
+        "model": "upstream-model",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "store": False,
+        "stream": True,
+        "include": ["reasoning.encrypted_content"],
+    }
+
+
 def test_system_and_developer_text_become_ordered_deterministic_instructions() -> None:
     request = ChatCompletionRequest(
         messages=(

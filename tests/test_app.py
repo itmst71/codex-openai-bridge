@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import re
+import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from openai.types.chat import ChatCompletion
 
@@ -65,6 +67,123 @@ class FakeUpstream:
     ) -> object:
         self.calls.append((credential, payload))
         return self.response
+
+
+class FakeResponsesByteStream:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        wait_after_chunks: asyncio.Event | None = None,
+        close_failure: Exception | None = None,
+    ) -> None:
+        self._chunks = iter(chunks)
+        self._wait_after_chunks = wait_after_chunks
+        self._close_failure = close_failure
+        self.close_calls = 0
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            return next(self._chunks)
+        except StopIteration:
+            if self._wait_after_chunks is not None:
+                await self._wait_after_chunks.wait()
+            raise StopAsyncIteration from None
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        if self._close_failure is not None:
+            raise self._close_failure
+
+
+class StreamingFakeUpstream:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        wait_after_chunks: asyncio.Event | None = None,
+        close_failure: Exception | None = None,
+    ) -> None:
+        self.stream = FakeResponsesByteStream(
+            chunks,
+            wait_after_chunks=wait_after_chunks,
+            close_failure=close_failure,
+        )
+        self.calls: list[tuple[Credential, dict[str, Any]]] = []
+
+    async def create_stream(
+        self, credential: Credential, payload: dict[str, Any]
+    ) -> FakeResponsesByteStream:
+        self.calls.append((credential, payload))
+        return self.stream
+
+
+def _sse_event(value: object) -> bytes:
+    return b"data: " + json.dumps(value, separators=(",", ":")).encode() + b"\n\n"
+
+
+def _stream_text_events() -> list[dict[str, object]]:
+    added_message = {
+        "id": "msg_stream",
+        "type": "message",
+        "status": "in_progress",
+        "role": "assistant",
+        "content": [],
+    }
+    done_message = {
+        **added_message,
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+    }
+    return [
+        {
+            "type": "response.created",
+            "response": {"id": "resp_stream", "created_at": 7, "status": "in_progress"},
+        },
+        {"type": "response.output_item.added", "output_index": 0, "item": added_message},
+        {
+            "type": "response.content_part.added",
+            "item_id": "msg_stream",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        },
+        {
+            "type": "response.output_text.delta",
+            "item_id": "msg_stream",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "hello",
+        },
+        {
+            "type": "response.output_text.done",
+            "item_id": "msg_stream",
+            "output_index": 0,
+            "content_index": 0,
+            "text": "hello",
+        },
+        {
+            "type": "response.content_part.done",
+            "item_id": "msg_stream",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "hello", "annotations": []},
+        },
+        {"type": "response.output_item.done", "output_index": 0, "item": done_message},
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_stream",
+                "created_at": 7,
+                "status": "completed",
+                "output": [done_message],
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+            },
+        },
+    ]
 
 
 class SequenceFakeUpstream(FakeUpstream):
@@ -237,6 +356,409 @@ async def test_authenticated_text_chat_completion_tracer_bullet(tmp_path: Path) 
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_streaming_text_prefetches_then_emits_sse_usage_and_done(tmp_path: Path) -> None:
+    wire = b"".join(_sse_event(event) for event in _stream_text_events())
+    upstream = StreamingFakeUpstream([wire + b"data: [DONE]\n\n"])
+    credential = _credential()
+    manager = StaticCredentialManager(credential)
+    app = create_app(_settings(tmp_path), manager, upstream=upstream)
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "codex",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            },
+            headers=AUTH,
+        )
+        body = await response.read()
+
+    assert response.status == 200
+    assert response.headers["Content-Type"] == "text/event-stream; charset=utf-8"
+    assert b'"role":"assistant"' in body
+    assert b'"content":"hello"' in body
+    assert b'"choices":[],"usage":{"prompt_tokens":1' in body
+    assert body.endswith(b"data: [DONE]\n\n")
+    assert manager.calls == [False]
+    assert upstream.calls[0][0] == credential
+    assert upstream.calls[0][1]["stream"] is True
+    assert upstream.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_failure_before_first_frame_returns_json_error(tmp_path: Path) -> None:
+    secret = "SENSITIVE_UPSTREAM_FAILURE"
+    upstream = StreamingFakeUpstream(
+        [_sse_event({"type": "response.failed", "response": {"error": secret}})]
+    )
+    app = create_app(_settings(tmp_path), StaticCredentialManager(_credential()), upstream=upstream)
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "codex",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+            },
+            headers=AUTH,
+        )
+        body = await response.read()
+
+    assert response.status == 502
+    assert response.headers["Content-Type"].startswith("application/json")
+    assert b"upstream_error" in body
+    assert secret.encode() not in body
+    assert upstream.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_malformed_after_first_frame_emits_one_error_and_no_done(
+    tmp_path: Path,
+) -> None:
+    events = _stream_text_events()[:4]
+    first = b"".join(_sse_event(event) for event in events)
+    secret = b"SENSITIVE_MALFORMED_VALUE"
+    upstream = StreamingFakeUpstream([first, b"data: {}\ndata: " + secret + b"\n\n"])
+    app = create_app(_settings(tmp_path), StaticCredentialManager(_credential()), upstream=upstream)
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "codex",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+            },
+            headers=AUTH,
+        )
+        body = await response.read()
+
+    assert response.status == 200
+    assert body.count(b'"code":"upstream_stream_error"') == 1
+    assert b"data: [DONE]" not in body
+    assert secret not in body
+    assert upstream.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_write_cancellation_propagates_and_closes_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = b"".join(_sse_event(event) for event in _stream_text_events()[:4])
+    upstream = StreamingFakeUpstream([first])
+    app = create_app(_settings(tmp_path), StaticCredentialManager(_credential()), upstream=upstream)
+
+    class CancellingResponse:
+        def __init__(self, *, status: int, headers: dict[str, str]) -> None:
+            del status, headers
+
+        async def prepare(self, request: object) -> None:
+            del request
+
+        async def write(self, frame: bytes) -> None:
+            del frame
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(web, "StreamResponse", CancellingResponse)
+    request = cast(Any, SimpleNamespace(app=app))
+
+    with pytest.raises(asyncio.CancelledError):
+        await app_module._stream_chat_completion(
+            request,
+            credential=_credential(),
+            payload={"model": "server-model", "stream": True},
+            include_usage=False,
+            deadline=time.monotonic() + 1,
+        )
+
+    assert upstream.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_protocol_failure_after_prefetch_writes_one_terminal_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = b"".join(_sse_event(event) for event in _stream_text_events()[:4])
+    upstream = StreamingFakeUpstream([first, b"data: {}\ndata: duplicate\n\n"])
+    app = create_app(_settings(tmp_path), StaticCredentialManager(_credential()), upstream=upstream)
+    writes: list[bytes] = []
+
+    class CollectingResponse:
+        def __init__(self, *, status: int, headers: dict[str, str]) -> None:
+            assert status == 200
+            assert headers["Content-Type"] == "text/event-stream; charset=utf-8"
+
+        async def prepare(self, request: object) -> None:
+            del request
+
+        async def write(self, frame: bytes) -> None:
+            writes.append(frame)
+
+    monkeypatch.setattr(web, "StreamResponse", CollectingResponse)
+    request = cast(Any, SimpleNamespace(app=app))
+
+    await app_module._stream_chat_completion(
+        request,
+        credential=_credential(),
+        payload={"model": "server-model", "stream": True},
+        include_usage=False,
+        deadline=time.monotonic() + 1,
+    )
+
+    combined = b"".join(writes)
+    assert b'"role":"assistant"' in combined
+    assert combined.count(b'"code":"upstream_stream_error"') == 1
+    assert b"data: [DONE]" not in combined
+    assert b"duplicate" not in combined
+    assert upstream.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_total_timeout_after_first_frame_uses_reserved_terminal_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = b"".join(_sse_event(event) for event in _stream_text_events()[:4])
+    settings = replace(_settings(tmp_path), total_request_deadline_seconds=0.1)
+    upstream = StreamingFakeUpstream([first], wait_after_chunks=asyncio.Event())
+    app = create_app(settings, StaticCredentialManager(_credential()), upstream=upstream)
+    writes: list[bytes] = []
+
+    class CollectingResponse:
+        def __init__(self, *, status: int, headers: dict[str, str]) -> None:
+            del status, headers
+
+        async def prepare(self, request: object) -> None:
+            del request
+
+        async def write(self, frame: bytes) -> None:
+            writes.append(frame)
+
+    monkeypatch.setattr(web, "StreamResponse", CollectingResponse)
+    request = cast(Any, SimpleNamespace(app=app))
+
+    await app_module._stream_chat_completion(
+        request,
+        credential=_credential(),
+        payload={"model": "server-model", "stream": True},
+        include_usage=False,
+        deadline=time.monotonic() + settings.total_request_deadline_seconds,
+    )
+
+    combined = b"".join(writes)
+    assert b'"role":"assistant"' in combined
+    assert combined.count(b'"code":"upstream_stream_error"') == 1
+    assert b"data: [DONE]" not in combined
+    assert upstream.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_budget_is_reserved_from_original_deadline_before_slow_prepare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = b"".join(_sse_event(event) for event in _stream_text_events()[:4])
+    settings = replace(_settings(tmp_path), total_request_deadline_seconds=0.2)
+    upstream = StreamingFakeUpstream([first], wait_after_chunks=asyncio.Event())
+    app = create_app(settings, StaticCredentialManager(_credential()), upstream=upstream)
+    writes: list[bytes] = []
+
+    class SlowPrepareAndTerminalWriteResponse:
+        def __init__(self, *, status: int, headers: dict[str, str]) -> None:
+            del status, headers
+
+        async def prepare(self, request: object) -> None:
+            del request
+            await asyncio.sleep(0.15)
+
+        async def write(self, frame: bytes) -> None:
+            if frame == app_module._STREAM_ERROR_FRAME:
+                await asyncio.sleep(0.01)
+            writes.append(frame)
+
+    monkeypatch.setattr(web, "StreamResponse", SlowPrepareAndTerminalWriteResponse)
+    request = cast(Any, SimpleNamespace(app=app))
+
+    await app_module._stream_chat_completion(
+        request,
+        credential=_credential(),
+        payload={"model": "server-model", "stream": True},
+        include_usage=False,
+        deadline=time.monotonic() + settings.total_request_deadline_seconds,
+    )
+
+    combined = b"".join(writes)
+    assert combined.count(b'"code":"upstream_stream_error"') == 1
+    assert b"data: [DONE]" not in combined
+    assert upstream.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_chunk_write_timeout_after_first_frame_uses_terminal_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire = b"".join(_sse_event(event) for event in _stream_text_events())
+    settings = replace(_settings(tmp_path), total_request_deadline_seconds=0.1)
+    upstream = StreamingFakeUpstream([wire + b"data: [DONE]\n\n"])
+    app = create_app(settings, StaticCredentialManager(_credential()), upstream=upstream)
+    writes: list[bytes] = []
+    write_calls = 0
+
+    class SlowSecondWriteResponse:
+        def __init__(self, *, status: int, headers: dict[str, str]) -> None:
+            del status, headers
+
+        async def prepare(self, request: object) -> None:
+            del request
+
+        async def write(self, frame: bytes) -> None:
+            nonlocal write_calls
+            write_calls += 1
+            if write_calls == 2:
+                await asyncio.Event().wait()
+            writes.append(frame)
+
+    monkeypatch.setattr(web, "StreamResponse", SlowSecondWriteResponse)
+    request = cast(Any, SimpleNamespace(app=app))
+
+    await app_module._stream_chat_completion(
+        request,
+        credential=_credential(),
+        payload={"model": "server-model", "stream": True},
+        include_usage=False,
+        deadline=time.monotonic() + settings.total_request_deadline_seconds,
+    )
+
+    combined = b"".join(writes)
+    assert b'"role":"assistant"' in combined
+    assert combined.count(b'"code":"upstream_stream_error"') == 1
+    assert b"data: [DONE]" not in combined
+    assert upstream.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_handled_stream_error_is_not_replaced_by_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = b"".join(_sse_event(event) for event in _stream_text_events()[:4])
+    upstream = StreamingFakeUpstream(
+        [first, b"data: {}\ndata: duplicate\n\n"],
+        close_failure=RuntimeError("SENSITIVE_CLOSE_FAILURE"),
+    )
+    app = create_app(_settings(tmp_path), StaticCredentialManager(_credential()), upstream=upstream)
+    writes: list[bytes] = []
+
+    class CollectingResponse:
+        def __init__(self, *, status: int, headers: dict[str, str]) -> None:
+            del status, headers
+
+        async def prepare(self, request: object) -> None:
+            del request
+
+        async def write(self, frame: bytes) -> None:
+            writes.append(frame)
+
+    monkeypatch.setattr(web, "StreamResponse", CollectingResponse)
+    request = cast(Any, SimpleNamespace(app=app))
+
+    await app_module._stream_chat_completion(
+        request,
+        credential=_credential(),
+        payload={"model": "server-model", "stream": True},
+        include_usage=False,
+        deadline=time.monotonic() + 1,
+    )
+
+    combined = b"".join(writes)
+    assert combined.count(b'"code":"upstream_stream_error"') == 1
+    assert b"data: [DONE]" not in combined
+    assert upstream.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_stream_close_failure_does_not_escape_after_prepare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire = b"".join(_sse_event(event) for event in _stream_text_events())
+    upstream = StreamingFakeUpstream(
+        [wire + b"data: [DONE]\n\n"],
+        close_failure=RuntimeError("SENSITIVE_CLOSE_FAILURE"),
+    )
+    app = create_app(_settings(tmp_path), StaticCredentialManager(_credential()), upstream=upstream)
+    writes: list[bytes] = []
+
+    class CollectingResponse:
+        def __init__(self, *, status: int, headers: dict[str, str]) -> None:
+            del status, headers
+
+        async def prepare(self, request: object) -> None:
+            del request
+
+        async def write(self, frame: bytes) -> None:
+            writes.append(frame)
+
+    monkeypatch.setattr(web, "StreamResponse", CollectingResponse)
+    request = cast(Any, SimpleNamespace(app=app))
+
+    await app_module._stream_chat_completion(
+        request,
+        credential=_credential(),
+        payload={"model": "server-model", "stream": True},
+        include_usage=False,
+        deadline=time.monotonic() + 1,
+    )
+
+    assert writes[-1] == b"data: [DONE]\n\n"
+    assert upstream.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_request_id_header_is_installed_before_prepare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire = b"".join(_sse_event(event) for event in _stream_text_events())
+    upstream = StreamingFakeUpstream([wire + b"data: [DONE]\n\n"])
+    app = create_app(_settings(tmp_path), StaticCredentialManager(_credential()), upstream=upstream)
+    prepared_headers: dict[str, str] = {}
+
+    class HeaderCapturingResponse:
+        def __init__(self, *, status: int, headers: dict[str, str]) -> None:
+            del status
+            self.headers = headers
+
+        async def prepare(self, request: object) -> None:
+            del request
+            prepared_headers.update(self.headers)
+
+        async def write(self, frame: bytes) -> None:
+            del frame
+
+    monkeypatch.setattr(web, "StreamResponse", HeaderCapturingResponse)
+    request = cast(Any, SimpleNamespace(app=app))
+
+    await app_module._stream_chat_completion(
+        request,
+        credential=_credential(),
+        payload={"model": "server-model", "stream": True},
+        include_usage=False,
+        deadline=time.monotonic() + 1,
+        request_id="b" * 32,
+    )
+
+    assert prepared_headers["X-Request-ID"] == "b" * 32
 
 
 @pytest.mark.asyncio
@@ -895,7 +1417,7 @@ async def test_malformed_upstream_tool_call_is_sanitized_502_direct(
         {
             "model": "codex",
             "messages": [{"role": "user", "content": "text"}],
-            "stream": True,
+            "stream_options": {"include_usage": True},
         },
     ],
 )
