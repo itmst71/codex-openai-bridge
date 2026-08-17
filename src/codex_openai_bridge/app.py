@@ -21,6 +21,12 @@ from codex_openai_bridge.json_boundary import (
     read_json_request,
     validate_json_request_headers,
 )
+from codex_openai_bridge.responses import (
+    ResponsesRequestError,
+    parse_responses_request,
+    responses_request_to_upstream,
+    responses_to_public,
+)
 from codex_openai_bridge.security import bearer_is_authorized, load_bridge_token
 from codex_openai_bridge.translation import (
     UpstreamResponseError,
@@ -456,6 +462,80 @@ async def _chat_completions(request: web.Request) -> web.Response:
     return web.json_response(completion)
 
 
+async def _responses(request: web.Request) -> web.Response:
+    deadline = time.monotonic() + request.app[_SETTINGS_KEY].total_request_deadline_seconds
+    settings = request.app[_SETTINGS_KEY]
+    try:
+        document = await _with_deadline(
+            read_json_request(
+                request,
+                max_body_bytes=settings.max_request_body_bytes,
+                max_depth=settings.max_json_depth,
+                max_nodes=settings.max_json_nodes,
+                max_string_bytes=settings.max_string_bytes,
+            ),
+            deadline=deadline,
+        )
+    except TimeoutError:
+        return _upstream_error_response(UpstreamError(UpstreamErrorKind.TIMEOUT))
+    except JsonBoundaryError as error:
+        return _json_boundary_response(error)
+    try:
+        responses_request = parse_responses_request(
+            document,
+            public_model=settings.public_model,
+            max_items=settings.max_messages,
+            max_tools=settings.max_tools,
+            max_json_depth=settings.max_json_depth,
+            max_json_nodes=settings.max_json_nodes,
+            max_string_bytes=settings.max_string_bytes,
+        )
+        payload = responses_request_to_upstream(
+            responses_request,
+            upstream_model=settings.upstream_model,
+        )
+    except ResponsesRequestError:
+        return _invalid_request_response()
+    if time.monotonic() > deadline:
+        return _upstream_error_response(UpstreamError(UpstreamErrorKind.TIMEOUT))
+
+    try:
+        credential_result = await _with_deadline(
+            request.app[_CREDENTIAL_PROVIDER_KEY].get_credentials(),
+            deadline=deadline,
+        )
+        credential = cast(Credential, credential_result)
+    except TimeoutError:
+        return _upstream_error_response(UpstreamError(UpstreamErrorKind.TIMEOUT))
+    except Exception:
+        return _credentials_error_response()
+    try:
+        upstream = cast(ResponsesUpstream, request.app[_UPSTREAM_KEY])
+        upstream_response = await _with_deadline(
+            upstream.create_response(credential, payload),
+            deadline=deadline,
+        )
+        public_response = responses_to_public(
+            upstream_response,
+            request=responses_request,
+            public_model=settings.public_model,
+            max_items=settings.max_messages,
+            max_tools=settings.max_tools,
+            max_json_depth=settings.max_json_depth,
+            max_json_nodes=settings.max_json_nodes,
+            max_string_bytes=settings.max_string_bytes,
+        )
+        if time.monotonic() > deadline:
+            raise UpstreamError(UpstreamErrorKind.TIMEOUT)
+    except UpstreamError as error:
+        return _upstream_error_response(error)
+    except UpstreamResponseError:
+        return _service_error_response()
+    except Exception:
+        return _service_error_response()
+    return web.json_response(public_response)
+
+
 def create_app(
     settings: Settings,
     credential_provider: CredentialProvider,
@@ -492,6 +572,11 @@ def create_app(
     app.router.add_post(
         "/v1/chat/completions",
         _chat_completions,
+        expect_handler=_protected_expect_handler,
+    )
+    app.router.add_post(
+        "/v1/responses",
+        _responses,
         expect_handler=_protected_expect_handler,
     )
     return app

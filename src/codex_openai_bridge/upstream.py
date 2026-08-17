@@ -27,6 +27,28 @@ _MAX_RETRY_AFTER_SECONDS = 86_400
 _monotonic = time.monotonic
 
 
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError
+        value[key] = item
+    return value
+
+
+def _decode_json_body(raw: bytes) -> object:
+    text = raw.decode("utf-8", errors="strict")
+    return json.loads(
+        text,
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_constant=_reject_json_constant,
+    )
+
+
 def _normalized_retry_after(value: object) -> str | None:
     if type(value) is not str or _DECIMAL_RETRY_AFTER.fullmatch(value) is None:
         return None
@@ -204,7 +226,7 @@ class HttpxResponsesUpstream:
             body.extend(chunk[:remaining])
             if len(chunk) > remaining or len(body) > self._max_body_bytes:
                 raise ValueError
-        return await asyncio.to_thread(json.loads, bytes(body))
+        return await asyncio.to_thread(_decode_json_body, bytes(body))
 
     async def _request_once(
         self,

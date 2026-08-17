@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from typing import Any
 
 import httpx
 import pytest
@@ -439,6 +440,30 @@ async def test_non_json_success_is_a_sanitized_upstream_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_nonstream_json_requires_strict_utf8_bytes() -> None:
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json"},
+            content='{"status":"completed"}'.encode("utf-16"),
+        )
+
+    settings = replace(Settings.from_env(), total_request_deadline_seconds=1.0)
+    upstream = HttpxResponsesUpstream(settings, transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(UpstreamError, match=r"^upstream request failed$"):
+            await upstream.create_response(_credential(), {})
+    finally:
+        await upstream.aclose()
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_total_request_deadline_bounds_the_whole_call() -> None:
     never_respond = asyncio.Event()
     calls = 0
@@ -699,11 +724,11 @@ async def test_total_deadline_can_interrupt_json_decode(
     release_decode = threading.Event()
     real_loads = json.loads
 
-    def blocking_loads(value: str | bytes | bytearray) -> object:
+    def blocking_loads(value: str | bytes | bytearray, **kwargs: Any) -> object:
         decode_started.set()
         if not release_decode.wait(timeout=1.0):
             raise AssertionError("decode was not released")
-        return real_loads(value)
+        return real_loads(value, **kwargs)
 
     monkeypatch.setattr(json, "loads", blocking_loads)
 
