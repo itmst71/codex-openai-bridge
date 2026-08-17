@@ -10,6 +10,7 @@ from aiohttp import web
 from codex_openai_bridge.app import create_app
 from codex_openai_bridge.auth import CredentialManager
 from codex_openai_bridge.config import Settings
+from codex_openai_bridge.logging import configure_logging
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -17,7 +18,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments:
         raise SystemExit("codex-openai-bridge does not accept arguments")
+    configure_logging()
     settings = Settings.from_env()
     app = create_app(settings, CredentialManager(settings))
-    web.run_app(app, host=settings.host, port=settings.port)
+    web.run_app(
+        app,
+        host=settings.host,
+        port=settings.port,
+        access_log=None,
+    )
     return 0

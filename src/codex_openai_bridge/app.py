@@ -27,6 +27,7 @@ from codex_openai_bridge.json_boundary import (
     read_json_request,
     validate_json_request_headers,
 )
+from codex_openai_bridge.logging import emit_request_log, endpoint_class
 from codex_openai_bridge.responses import (
     ResponsesRequest,
     ResponsesRequestError,
@@ -36,6 +37,7 @@ from codex_openai_bridge.responses import (
 )
 from codex_openai_bridge.responses_stream import ResponsesSseTranslator
 from codex_openai_bridge.security import bearer_is_authorized, load_bridge_token
+from codex_openai_bridge.server import install_sanitized_protocol
 from codex_openai_bridge.translation import (
     UpstreamResponseError,
     chat_request_to_responses,
@@ -73,6 +75,7 @@ _READINESS_EXPIRY_SKEW_SECONDS = 60
 _REQUEST_ID_BYTES = 16
 _REQUEST_ID_HEADER = "X-Request-ID"
 _REQUEST_ID_KEY = web.RequestKey("request_id", str)
+_PREPARED_RESPONSE_KEY = web.RequestKey("prepared_response", web.StreamResponse)
 _ADMISSION_LEASE_KEY = web.RequestKey("admission_lease", AdmissionLease)
 _GENERATION_PATHS = frozenset({"/v1/chat/completions", "/v1/responses"})
 
@@ -97,15 +100,89 @@ def _response_request_id(request: web.Request) -> str:
     return secrets.token_hex(_REQUEST_ID_BYTES)
 
 
+def _request_content_length(request: web.Request) -> int | None:
+    try:
+        value = request.content_length
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return value if type(value) is int and value >= 0 else None
+
+
+def _response_body_length(response: web.StreamResponse) -> int | None:
+    try:
+        body = getattr(response, "body", None)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return len(cast(bytes | bytearray, body)) if type(body) in (bytes, bytearray) else None
+
+
+def _emit_request_log_safely(**fields: object) -> None:
+    try:
+        emit_request_log(**fields)
+    except BaseException:
+        # Logging is best-effort and must never replace success or cancellation.
+        return
+
+
+def _mark_response_prepared(request: object, response: web.StreamResponse) -> None:
+    try:
+        cast(web.Request, request)[_PREPARED_RESPONSE_KEY] = response
+    except (AttributeError, TypeError):
+        # Direct stream unit fixtures bypass the request middleware entirely.
+        return
+
+
 @web.middleware
 async def _request_id_middleware(
     request: web.Request,
     handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
 ) -> web.StreamResponse:
+    started = time.monotonic()
     request_id = _assign_request_id(request)
-    response = await handler(request)
-    response.headers[_REQUEST_ID_HEADER] = request_id
-    return response
+    endpoint = endpoint_class(
+        getattr(request, "method", None),
+        getattr(request, "path", None),
+    )
+    request_bytes = _request_content_length(request)
+    response: web.StreamResponse | None = None
+    status = 500
+    try:
+        try:
+            response = await handler(request)
+        except web.HTTPException as error:
+            response = error
+        except asyncio.CancelledError:
+            status = 499
+            raise
+        except Exception:
+            prepared_response = request.get(_PREPARED_RESPONSE_KEY)
+            if isinstance(prepared_response, web.StreamResponse):
+                response = prepared_response
+            else:
+                response = openai_error_response(
+                    status=500,
+                    message="Internal server error",
+                    error_type="server_error",
+                    code="internal_error",
+                )
+        prepared_response = request.get(_PREPARED_RESPONSE_KEY)
+        if isinstance(prepared_response, web.StreamResponse):
+            response = prepared_response
+        assert response is not None
+        final_response = response
+        status = final_response.status
+        if request.get(_PREPARED_RESPONSE_KEY) is not final_response:
+            final_response.headers[_REQUEST_ID_HEADER] = request_id
+        return final_response
+    finally:
+        _emit_request_log_safely(
+            request_id=request_id,
+            endpoint=endpoint,
+            status=status,
+            duration_ms=int(max(0.0, time.monotonic() - started) * 1000),
+            request_bytes=request_bytes,
+            response_bytes=(_response_body_length(response) if response is not None else None),
+        )
 
 
 def _request_is_authorized(request: web.Request) -> bool:
@@ -129,7 +206,30 @@ def _json_boundary_response(error: JsonBoundaryError) -> web.Response:
     )
 
 
+def _finalize_early_response(
+    request: web.Request,
+    response: web.StreamResponse,
+    *,
+    started: float,
+) -> web.StreamResponse:
+    request_id = _assign_request_id(request)
+    response.headers[_REQUEST_ID_HEADER] = request_id
+    _emit_request_log_safely(
+        request_id=request_id,
+        endpoint=endpoint_class(
+            getattr(request, "method", None),
+            getattr(request, "path", None),
+        ),
+        status=response.status,
+        duration_ms=int(max(0.0, time.monotonic() - started) * 1000),
+        request_bytes=_request_content_length(request),
+        response_bytes=_response_body_length(response),
+    )
+    return response
+
+
 async def _protected_expect_handler(request: web.Request) -> web.StreamResponse | None:
+    started = time.monotonic()
     if not _request_is_authorized(request):
         response = openai_error_response(
             status=401,
@@ -138,8 +238,7 @@ async def _protected_expect_handler(request: web.Request) -> web.StreamResponse 
             code="invalid_api_key",
             headers={"WWW-Authenticate": "Bearer"},
         )
-        response.headers[_REQUEST_ID_HEADER] = _assign_request_id(request)
-        return response
+        return _finalize_early_response(request, response, started=started)
     try:
         validate_json_request_headers(
             request,
@@ -147,23 +246,22 @@ async def _protected_expect_handler(request: web.Request) -> web.StreamResponse 
         )
     except JsonBoundaryError as error:
         response = _json_boundary_response(error)
-        response.headers[_REQUEST_ID_HEADER] = _assign_request_id(request)
-        return response
+        return _finalize_early_response(request, response, started=started)
     if request.version != HttpVersion11:
         return None
     expect_values = request.headers.getall(hdrs.EXPECT, [])
     if len(expect_values) != 1 or expect_values[0].lower() != "100-continue":
-        raise web.HTTPExpectationFailed(text="Unsupported expectation")
+        expectation_error = web.HTTPExpectationFailed(text="Unsupported expectation")
+        _finalize_early_response(request, expectation_error, started=started)
+        raise expectation_error
     try:
         lease = await request.app[_ADMISSION_KEY].acquire()
     except AdmissionQueueTimeout:
         response = _queue_timeout_response()
-        response.headers[_REQUEST_ID_HEADER] = _assign_request_id(request)
-        return response
+        return _finalize_early_response(request, response, started=started)
     except AdmissionShuttingDown:
         response = _shutdown_response()
-        response.headers[_REQUEST_ID_HEADER] = _assign_request_id(request)
-        return response
+        return _finalize_early_response(request, response, started=started)
     request[_ADMISSION_LEASE_KEY] = lease
     try:
         await request.writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
@@ -256,6 +354,7 @@ async def _unsupported_embeddings(_request: web.Request) -> web.Response:
 
 async def _unsupported_embeddings_expect_handler(request: web.Request) -> web.StreamResponse:
     """Reject an unsupported upload before aiohttp emits ``100 Continue``."""
+    started = time.monotonic()
     if not _request_is_authorized(request):
         response = openai_error_response(
             status=401,
@@ -274,8 +373,7 @@ async def _unsupported_embeddings_expect_handler(request: web.Request) -> web.St
             response = _json_boundary_response(error)
         else:
             response = await _unsupported_embeddings(request)
-    response.headers[_REQUEST_ID_HEADER] = _assign_request_id(request)
-    return response
+    return _finalize_early_response(request, response, started=started)
 
 
 def _credential_is_ready(value: object, *, now: float) -> bool:
@@ -356,12 +454,19 @@ _STREAM_ERROR_FRAME = (
 )
 
 
-async def _with_deadline(awaitable: Awaitable[object], *, deadline: float) -> object:
+async def _with_deadline(
+    awaitable: Awaitable[object],
+    *,
+    deadline: float,
+    on_completed: Callable[[], None] | None = None,
+) -> object:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError
     async with asyncio.timeout(remaining):
         result = await awaitable
+        if on_completed is not None:
+            on_completed()
     if time.monotonic() > deadline:
         raise TimeoutError
     return result
@@ -483,14 +588,22 @@ async def _stream_bounded_sse(
         nonlocal success_terminal_written
         success_terminal_written = True
 
+    def mark_response_prepared() -> None:
+        nonlocal response_prepared
+        response_prepared = True
+        _mark_response_prepared(request, response)
+
     try:
         try:
-            await _with_deadline(response.prepare(request), deadline=body_deadline)
+            await _with_deadline(
+                response.prepare(request),
+                deadline=body_deadline,
+                on_completed=mark_response_prepared,
+            )
         except TimeoutError:
             if prepare_timeout_is_upstream:
                 raise UpstreamError(UpstreamErrorKind.TIMEOUT) from None
             raise
-        response_prepared = True
         try:
             assert translated is not None
             first_is_success_terminal = translated.is_success_terminal_frame(first_frame)
@@ -841,4 +954,5 @@ def create_app(
         _responses,
         expect_handler=_protected_expect_handler,
     )
+    install_sanitized_protocol(app)
     return app
