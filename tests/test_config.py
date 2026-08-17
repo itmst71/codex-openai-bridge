@@ -94,17 +94,26 @@ def test_settings_are_immutable() -> None:
         settings.port = 9000  # type: ignore[misc]
 
 
-def test_default_paths_are_absolute_and_fixed() -> None:
+def test_default_paths_are_derived_from_current_user_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_BRIDGE_HERMES_PYTHON", raising=False)
+    monkeypatch.delenv("CODEX_BRIDGE_HELPER_PATH", raising=False)
+    monkeypatch.delenv("CODEX_BRIDGE_CLIENT_TOKEN_FILE", raising=False)
+
     settings = Settings.from_env()
 
-    assert settings.hermes_python_path == Path("/home/itmst/.hermes/hermes-agent/venv/bin/python")
+    assert settings.hermes_python_path == (
+        home / ".hermes" / "hermes-agent" / "venv" / "bin" / "python"
+    )
     assert (
         settings.helper_path
         == Path(config_module.__file__).with_name("hermes_credential_helper.py").resolve()
     )
-    assert settings.client_token_file == (
-        Path.home() / ".config" / "codex-openai-bridge" / "client-token"
-    )
+    assert settings.client_token_file == home / ".config" / "codex-openai-bridge" / "client-token"
     assert settings.hermes_python_path.is_absolute()
     assert settings.helper_path.is_absolute()
     assert settings.client_token_file.is_absolute()

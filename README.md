@@ -52,7 +52,7 @@ The bridge does not claim OpenAI Developer API SLA equivalence, embedding suppor
 - Codex OAuth credentials are resolved by a bounded subprocess using the Hermes Python environment. They are not copied into this repository or the systemd unit.
 - Upstream URL, authorization, account ID, model, prompts, tool arguments, and encrypted reasoning are excluded from operational logs and sanitized errors.
 - Request bodies, JSON structure, helper output, upstream bodies, SSE events/streams, queueing, concurrency, deadlines, and shutdown are bounded.
-- `ProtectHome=read-only` is relaxed only with `ReadWritePaths=/home/itmst/.hermes` because Hermes may atomically refresh authentication state there.
+- `ProtectHome=read-only` is relaxed only with `ReadWritePaths=%h/.hermes` because Hermes may atomically refresh authentication state there. In systemd units, `%h` expands to the service user's home directory.
 - The sandbox reduces accidental access and service compromise impact. It does not claim protection from every malicious process already running as the same Unix UID.
 - Do not expose port 8646 through a public reverse proxy. If a remote trusted consumer is required, use a separately reviewed authenticated tunnel and preserve the loopback bind.
 
@@ -61,7 +61,9 @@ The bridge does not claim OpenAI Developer API SLA equivalence, embedding suppor
 Create the environment and install the locked project:
 
 ```bash
-cd /home/itmst/src/codex-openai-bridge
+git clone https://github.com/itmst71/codex-openai-bridge.git \
+  "$HOME/src/codex-openai-bridge"
+cd "$HOME/src/codex-openai-bridge"
 uv sync --locked
 ```
 
@@ -73,7 +75,7 @@ The service reads validated environment variables. Important settings and defaul
 | `CODEX_BRIDGE_PORT` | `8646` | TCP port 1–65535 |
 | `CODEX_BRIDGE_CLIENT_TOKEN_FILE` | `~/.config/codex-openai-bridge/client-token` | Absolute path; owner, regular file, mode `0600` |
 | `CODEX_BRIDGE_UPSTREAM_MODEL` | project default | Canonical server-owned model identifier |
-| `CODEX_BRIDGE_HERMES_PYTHON` | `/home/itmst/.hermes/hermes-agent/venv/bin/python` | Hermes credential-helper interpreter |
+| `CODEX_BRIDGE_HERMES_PYTHON` | `$HOME/.hermes/hermes-agent/venv/bin/python` | Hermes credential-helper interpreter; resolved from the current user's home |
 | `CODEX_BRIDGE_HELPER_PATH` | installed package helper | Absolute helper path |
 | `CODEX_BRIDGE_MAX_IN_FLIGHT` | `2` | Bounded concurrent owners, maximum 10 |
 | `CODEX_BRIDGE_QUEUE_WAIT_SECONDS` | `10` | Bounded admission wait |
@@ -97,7 +99,7 @@ Generate exactly 32 random bytes encoded as 43 unpadded URL-safe characters. Do 
 ```bash
 install -d -m 700 "$HOME/.config/codex-openai-bridge"
 umask 077
-/home/itmst/src/codex-openai-bridge/.venv/bin/python -c \
+"$HOME/src/codex-openai-bridge/.venv/bin/python" -c \
   'import secrets,sys; sys.stdout.write(secrets.token_urlsafe(32) + "\n")' \
   > "$HOME/.config/codex-openai-bridge/client-token"
 chmod 600 "$HOME/.config/codex-openai-bridge/client-token"
@@ -112,7 +114,7 @@ The host must provide a user manager. Logout/boot persistence additionally requi
 Validate and install without starting over an occupied port:
 
 ```bash
-cd /home/itmst/src/codex-openai-bridge
+cd "$HOME/src/codex-openai-bridge"
 uv sync --locked
 systemd-analyze --user verify deploy/systemd/codex-openai-bridge.service
 install -Dm644 deploy/systemd/codex-openai-bridge.service \
@@ -120,6 +122,10 @@ install -Dm644 deploy/systemd/codex-openai-bridge.service \
 systemctl --user daemon-reload
 systemctl --user enable codex-openai-bridge.service
 ```
+
+The checked-in unit uses systemd's `%h` specifier and therefore expects this checkout at
+`$HOME/src/codex-openai-bridge`. If you install it elsewhere, copy the unit and replace
+`WorkingDirectory` and `ExecStart` with absolute paths for that checkout before validation.
 
 Before starting, stop any manually launched bridge and prove port 8646 is free:
 
@@ -226,6 +232,7 @@ Keep `max_retries=0`: ambiguous automatic generation retries can duplicate outpu
 5. Reinstall the unit, run `systemctl --user daemon-reload`, then start and verify health/readiness/listener ownership.
 
 ```bash
+cd "$HOME/src/codex-openai-bridge"
 systemctl --user stop codex-openai-bridge.service
 git switch --detach <reviewed-revision>
 uv sync --locked

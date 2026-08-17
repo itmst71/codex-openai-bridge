@@ -21,8 +21,20 @@ def _single_directive(raw: str, name: str) -> str:
 
 
 def _rooted(root: Path, path: Path, *, name: str) -> Path:
-    if not path.is_absolute() or ".." in path.parts:
-        raise RuntimeError(f"{name} must be an absolute path without parent traversal")
+    parts = path.parts
+    if ".." in parts:
+        raise RuntimeError(f"{name} must not contain parent traversal")
+    if parts and parts[0] == "%h":
+        if any("%" in part for part in parts[1:]):
+            raise RuntimeError(f"{name} contains an unsupported systemd specifier")
+        user_home = Path.home()
+        if not user_home.is_absolute() or ".." in user_home.parts:
+            raise RuntimeError("current user home must be an absolute path without traversal")
+        path = user_home.joinpath(*parts[1:])
+    elif not path.is_absolute() or any("%" in part for part in parts):
+        raise RuntimeError(
+            f"{name} must be absolute or start with %h and contain no other specifier"
+        )
     return root / path.relative_to("/")
 
 

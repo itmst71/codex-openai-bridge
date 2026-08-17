@@ -144,7 +144,7 @@ class Settings:
             upstream_model=_configured_model(),
             hermes_python_path=_configured_path(
                 "CODEX_BRIDGE_HERMES_PYTHON",
-                Path("/home/itmst/.hermes/hermes-agent/venv/bin/python"),
+                Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "python",
             ),
             helper_path=_configured_path(
                 "CODEX_BRIDGE_HELPER_PATH",
