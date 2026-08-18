@@ -33,16 +33,68 @@ The public model name is always `codex`. The bridge reconstructs the upstream mo
 | `GET /readyz` | Supported; bounded credential readiness |
 | `GET /v1/models` | Supported; lists only `codex` |
 | `POST /v1/chat/completions` | Supported, including SSE streaming |
-| `POST /v1/responses` | Supported, including named Responses SSE events |
-| Function/tool calling and tool history | Supported with strict identity checks |
+| `POST /v1/responses` | Supported for the live-proven stateless subset, including named Responses SSE events |
+| Function tools and tool history | Supported with strict identity and call/output pairing checks |
+| One named custom tool | Supported for exact declaration, call, output replay, non-stream, and stream lifecycles; the bridge never executes the tool |
+| Native context compaction | Supported as an opaque bounded checkpoint lifecycle when `context_management` is explicitly requested |
 | `text`, `json_object`, and `json_schema` response formats | Supported subject to upstream behavior |
-| `max_tokens`, `max_completion_tokens`, and `max_output_tokens` | Accepted and strictly validated for SDK/Honcho compatibility, but not forwarded because the Codex OAuth backend rejects `max_output_tokens` |
-| Usage projection and encrypted reasoning round-trip | Supported with bounded validation |
+| Chat `max_tokens` and `max_completion_tokens` | Accepted and strictly validated for SDK/Honcho compatibility, but not forwarded because the Codex OAuth backend rejects `max_output_tokens` |
+| Direct Responses `max_output_tokens` | Unsupported and rejected rather than silently ignored |
+| Reasoning, prompt cache, service tier, stream options, and text verbosity | Supported only for the exact live-proven values described below |
+| Usage projection and encrypted reasoning round-trip | Supported with bounded validation; confirmed `cache_write_tokens` is retained as a typed field in SDK 3.1.0 and in `model_extra` in SDK 1.109.1, while unknown usage fields are rejected |
 | `POST /v1/embeddings` | **Embeddings are not supported**; returns a sanitized unsupported error |
+| `previous_response_id`, conversations, and stored response retrieval | Unsupported; the bridge remains stateless and forces `store:false` |
+| Local shell, web search, computer use, MCP, hosted tools, and image input | Unsupported and rejected; no capability is emulated |
 | Client-selected upstream URL/model/account/auth policy | Unsupported and ignored/rejected |
 | Automatic retry of 429, 5xx, timeout, or interrupted generation | Unsupported; only one exact credential refresh/replay after upstream 401 |
 
 The bridge does not claim OpenAI Developer API SLA equivalence, embedding support, or permanent permission to use a ChatGPT/Codex subscription as a service backend. Confirm applicable product terms and operational limits before sustained deployment.
+
+### Direct Responses capability contract
+
+Compatibility follows the behavior of the real Codex backend, not every field present in an
+OpenAI SDK release. Unknown fields, unproven enum values, stateful features, contradictory SSE
+snapshots, and malformed or expanded tool authority are rejected before they can become silent
+compatibility drift.
+
+The currently supported direct Responses request controls are:
+
+- fixed public `model="codex"`, text `input`, and bounded user/developer/assistant message items;
+- `instructions`;
+- `reasoning.effort`: `none`, `low`, `medium`, `high`, `xhigh`, or `max`;
+- `reasoning.summary`: `auto`, `concise`, or `detailed`;
+- bounded `prompt_cache_key`;
+- `service_tier="default"`;
+- `stream_options={"include_obfuscation": <bool>}` on streaming requests only;
+- `text.verbosity`: `low`, `medium`, or `high`, plus the documented JSON format subset;
+- function tools, or exactly one custom tool with an exact named choice and
+  `parallel_tool_calls=false`;
+- `context_management=[{"type":"compaction","compact_threshold":N}]` with a bounded positive
+  threshold; compaction cannot be combined with function or custom tools because that cross-product
+  has not been proven against the backend;
+- `store=false` and `include=["reasoning.encrypted_content"]`; both policies are also forced
+  upstream by the server.
+
+Developer messages use the explicit content-part form. Assistant replay items accept the
+live-proven `completed`, `in_progress`, and `incomplete` status values and optional
+`commentary`/`final_answer` phase. Encrypted reasoning and compaction blobs are opaque replay
+authority: the bridge validates bounds, ordering, identity, and duplication without logging or
+decrypting their contents.
+
+Validated reasoning summaries are exposed only when the client explicitly requests
+`reasoning.summary`; an unsolicited nonempty upstream summary is rejected. Confirmed assistant
+`phase` is retained as a typed SDK 3.1.0 field and through `model_extra` in SDK 1.109.1.
+
+Custom-tool streaming normalizes the backend's exact item/input-delta lifecycle into SDK-shaped
+events, strips provider obfuscation metadata, and restores the terminal custom call when the
+backend's completed snapshot omits it. Only the validated both-present or both-null identifier
+variants are accepted; null identifiers are replaced with deterministic collision-checked public
+identifiers. When `stream_options.include_obfuscation=false`, an omitted provider obfuscation field
+is accepted while all present obfuscation values remain bounded and validated.
+
+Offline contract tests run against the locked OpenAI Python SDK 1.109.1 and separately against
+OpenAI Python SDK 3.1.0. Native compaction has a typed SDK contract only in 3.1.0; the common
+Responses request, function/custom tool, non-stream, and stream subset is tested on both.
 
 ## Security assumptions
 

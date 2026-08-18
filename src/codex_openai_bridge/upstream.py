@@ -150,6 +150,26 @@ class OwnedStreamingResponsesUpstream(StreamingResponsesUpstream, Protocol):
     async def aclose(self) -> None: ...
 
 
+def _named_custom_tool_from_payload(payload: dict[str, Any]) -> str | None:
+    choice = payload.get("tool_choice")
+    tools = payload.get("tools")
+    if type(choice) is not dict:
+        return None
+    name = choice.get("name")
+    if (
+        set(choice) != {"type", "name"}
+        or choice.get("type") != "custom"
+        or type(name) is not str
+        or type(tools) is not list
+        or len(tools) != 1
+        or type(tools[0]) is not dict
+        or tools[0].get("type") != "custom"
+        or tools[0].get("name") != name
+    ):
+        return None
+    return name
+
+
 class BufferedResponsesUpstream:
     """Expose public non-stream calls over the stream-only Codex backend."""
 
@@ -176,8 +196,10 @@ class BufferedResponsesUpstream:
         stream = await self._upstream.create_stream(credential, streaming_payload)
         validator = ResponsesStreamValidator(
             public_model=self._settings.public_model,
+            allow_compaction="context_management" in payload,
             max_unknown_events=self._settings.max_json_nodes,
             max_string_bytes=self._settings.max_string_bytes,
+            custom_tool_name=_named_custom_tool_from_payload(payload),
         )
         try:
             async for event in parse_responses_sse(

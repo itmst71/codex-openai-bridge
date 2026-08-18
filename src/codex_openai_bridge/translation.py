@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import re
 import secrets
 import time
 from collections.abc import AsyncIterable, AsyncIterator
@@ -257,6 +259,31 @@ class _ToolStreamItem:
 class _ReasoningStreamItem:
     output_index: int
     item_id: str
+    provider_statusless: bool = False
+    transient_encrypted_digest: bytes | None = None
+    item_done: bool = False
+
+
+@dataclass(slots=True)
+class _CompactionStreamItem:
+    output_index: int
+    item_id: str
+    item: dict[str, Any]
+    encrypted_digest: bytes
+    item_done: bool = False
+
+
+@dataclass(slots=True)
+class _CustomStreamItem:
+    output_index: int
+    item_id: str
+    call_id: str
+    provider_item_id: str | None
+    provider_call_id: str | None
+    name: str
+    tool_input: str = ""
+    input_done: bool = False
+    item_done: bool = False
 
 
 def _json_type_exact_equal(left: object, right: object) -> bool:
@@ -288,6 +315,15 @@ def _exact_fields(
 
 def _nonempty_string(value: object) -> str:
     if type(value) is not str or not value:
+        raise _invalid_stream()
+    return value
+
+
+_STREAM_ITEM_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
+
+
+def _stream_item_id(value: object) -> str:
+    if type(value) is not str or _STREAM_ITEM_ID.fullmatch(value) is None:
         raise _invalid_stream()
     return value
 
@@ -339,23 +375,40 @@ class _ResponsesStreamTranslator:
         *,
         public_model: str,
         include_usage: bool,
+        allow_compaction: bool,
         max_unknown_events: int,
         max_string_bytes: int,
+        initial_item_ids: frozenset[str] = frozenset(),
+        initial_encrypted_digests: frozenset[bytes] = frozenset(),
+        custom_tool_name: str | None = None,
+        max_items: int | None = None,
+        max_tools: int | None = None,
+        initial_call_ids: frozenset[str] = frozenset(),
     ) -> None:
         if (
             type(public_model) is not str
             or not public_model
             or type(include_usage) is not bool
+            or type(allow_compaction) is not bool
             or type(max_unknown_events) is not int
             or max_unknown_events <= 0
             or type(max_string_bytes) is not int
             or max_string_bytes <= 0
+            or (
+                custom_tool_name is not None and _STREAM_ITEM_ID.fullmatch(custom_tool_name) is None
+            )
+            or (max_items is not None and (type(max_items) is not int or max_items <= 0))
+            or (max_tools is not None and (type(max_tools) is not int or max_tools <= 0))
         ):
             raise _invalid_stream()
         self.public_model = public_model
         self.include_usage = include_usage
+        self.allow_compaction = allow_compaction
         self.max_unknown_events = max_unknown_events
         self.max_string_bytes = max_string_bytes
+        self.custom_tool_name = custom_tool_name
+        self.max_items = max_items
+        self.max_tools = max_tools
         self.identity = StreamIdentity(
             response_id="chatcmpl-" + secrets.token_hex(12), created=int(time.time())
         )
@@ -365,10 +418,20 @@ class _ResponsesStreamTranslator:
         self.next_tool_index = 0
         self.text_item: _TextStreamItem | None = None
         self.tools: dict[str, _ToolStreamItem] = {}
+        self.custom_call: _CustomStreamItem | None = None
         self.items_by_index: dict[
-            int, _TextStreamItem | _ToolStreamItem | _ReasoningStreamItem
+            int,
+            _TextStreamItem
+            | _ToolStreamItem
+            | _ReasoningStreamItem
+            | _CompactionStreamItem
+            | _CustomStreamItem,
         ] = {}
-        self.item_ids: set[str] = set()
+        self.item_ids: set[str] = set(initial_item_ids)
+        self.call_ids: set[str] = set(initial_call_ids)
+        self.encrypted_digests: set[bytes] = set(initial_encrypted_digests)
+        self.transient_reasoning_digests: set[bytes] = set()
+        self.compaction_count = 0
         self.done_items: dict[int, dict[str, Any]] = {}
         self.projected_done_items: dict[int, dict[str, Any]] = {}
         self.last_sequence: int | None = None
@@ -463,13 +526,16 @@ class _ResponsesStreamTranslator:
             if type(part) is not dict or type(part.get("text")) is not str:
                 raise _invalid_stream()
             canonical_content.append(self._text_part(part, expected_text=part["text"]))
-        return {
+        projected = {
             "id": value["id"],
             "type": value["type"],
             "status": value["status"],
             "role": value["role"],
             "content": canonical_content,
         }
+        if "phase" in value:
+            projected["phase"] = value["phase"]
+        return projected
 
     def _text_part(self, value: object, *, expected_text: str) -> dict[str, Any]:
         if type(value) is not dict:
@@ -501,9 +567,33 @@ class _ResponsesStreamTranslator:
             raise _invalid_stream()
         return value
 
-    def _reasoning_item(self, value: object, *, status: str) -> dict[str, Any]:
+    def _reasoning_item(
+        self, value: object, *, status: str
+    ) -> tuple[dict[str, Any], bool, bytes | None]:
         if type(value) is not dict:
             raise _invalid_stream()
+        provider_fields = {"id", "type", "summary", "content", "encrypted_content"}
+        if set(value) == provider_fields:
+            item_id = _stream_item_id(value["id"])
+            digest = encrypted_reasoning_data_digest(
+                value["encrypted_content"], max_string_bytes=self.max_string_bytes
+            )
+            if (
+                value["type"] != "reasoning"
+                or value["summary"] != []
+                or value["content"] != []
+                or digest is None
+            ):
+                raise _invalid_stream()
+            projected: dict[str, Any] = {
+                "id": item_id,
+                "type": "reasoning",
+                "status": status,
+                "summary": [],
+            }
+            if status == "completed":
+                projected["encrypted_content"] = value["encrypted_content"]
+            return projected, True, digest
         if (
             value.get("type") != "reasoning"
             or value.get("status") != status
@@ -516,7 +606,76 @@ class _ResponsesStreamTranslator:
             )
         ):
             raise _invalid_stream()
-        return value
+        return value, False, None
+
+    def _compaction_item(self, value: object) -> tuple[dict[str, Any], bytes]:
+        if type(value) is not dict or set(value) != {"id", "type", "encrypted_content"}:
+            raise _invalid_stream()
+        item_id = _stream_item_id(value["id"])
+        if value["type"] != "compaction":
+            raise _invalid_stream()
+        encrypted_content = value["encrypted_content"]
+        digest = encrypted_reasoning_data_digest(
+            encrypted_content,
+            max_string_bytes=self.max_string_bytes,
+        )
+        if digest is None:
+            raise _invalid_stream()
+        return (
+            {
+                "id": item_id,
+                "type": "compaction",
+                "encrypted_content": encrypted_content,
+            },
+            digest,
+        )
+
+    def _synthesized_custom_ids(self, output_index: int) -> tuple[str, str]:
+        digest = hashlib.sha256(
+            (
+                f"codex-openai-bridge:custom-tool-call\0{self.identity.response_id}\0{output_index}"
+            ).encode("utf-8", errors="strict")
+        ).hexdigest()
+        return f"ctc_sha256_{digest}", f"call_sha256_{digest}"
+
+    def _custom_item(self, value: object, *, status: str, output_index: int) -> dict[str, Any]:
+        if type(value) is not dict or set(value) != {
+            "id",
+            "type",
+            "status",
+            "call_id",
+            "name",
+            "input",
+        }:
+            raise _invalid_stream()
+        provider_item_id = value["id"]
+        provider_call_id = value["call_id"]
+        if provider_item_id is None and provider_call_id is None:
+            item_id, call_id = self._synthesized_custom_ids(output_index)
+        elif type(provider_item_id) is str and type(provider_call_id) is str:
+            item_id = _stream_item_id(provider_item_id)
+            call_id = _stream_item_id(provider_call_id)
+        else:
+            raise _invalid_stream()
+        name = _stream_item_id(value["name"])
+        tool_input = value["input"]
+        if (
+            self.custom_tool_name is None
+            or value["type"] != "custom_tool_call"
+            or value["status"] != status
+            or name != self.custom_tool_name
+            or type(tool_input) is not str
+            or len(tool_input.encode("utf-8", errors="strict")) > self.max_string_bytes
+        ):
+            raise _invalid_stream()
+        return {
+            "id": item_id,
+            "type": "custom_tool_call",
+            "status": status,
+            "call_id": call_id,
+            "name": name,
+            "input": tool_input,
+        }
 
     def _on_output_added(self, event: dict[str, Any]) -> tuple[bytes, ...]:
         _exact_fields(
@@ -525,17 +684,38 @@ class _ResponsesStreamTranslator:
             {"sequence_number"},
         )
         output_index = self._validate_output_index(event)
-        if output_index != self.next_output_index:
+        if output_index != self.next_output_index or (
+            self.max_items is not None and self.next_output_index >= self.max_items
+        ):
+            raise _invalid_stream()
+        if any(
+            isinstance(state, _CompactionStreamItem) and not state.item_done
+            for state in self.items_by_index.values()
+        ):
             raise _invalid_stream()
         self.next_output_index += 1
         item = event["item"]
         if type(item) is not dict:
             raise _invalid_stream()
         item_type = item.get("type")
+        if self.custom_tool_name is not None and item_type not in {
+            "reasoning",
+            "custom_tool_call",
+        }:
+            raise _invalid_stream()
+        if self.compaction_count == 2 or (
+            self.compaction_count == 1 and self.text_item is None and item_type != "message"
+        ):
+            raise _invalid_stream()
         if item_type == "message":
             message = self._message_item(item, status="in_progress")
             item_id = _nonempty_string(message["id"])
-            if self.text_item is not None or item_id in self.item_ids or message["content"] != []:
+            if (
+                self.text_item is not None
+                or item_id in self.item_ids
+                or message["content"] != []
+                or (self.compaction_count == 1 and item.get("phase") != "final_answer")
+            ):
                 raise _invalid_stream()
             self.item_ids.add(item_id)
             text_state = _TextStreamItem(output_index, item_id)
@@ -585,14 +765,108 @@ class _ResponsesStreamTranslator:
             )
             return self._visible_frames(frame)
         if item_type == "reasoning":
-            reasoning = self._reasoning_item(item, status="in_progress")
+            reasoning, provider_statusless, transient_digest = self._reasoning_item(
+                item, status="in_progress"
+            )
             reasoning_id = _nonempty_string(reasoning["id"])
-            if reasoning_id in self.item_ids:
+            if (
+                reasoning_id in self.item_ids
+                or self.custom_call is not None
+                or (
+                    transient_digest is not None
+                    and (
+                        transient_digest in self.encrypted_digests
+                        or transient_digest in self.transient_reasoning_digests
+                    )
+                )
+            ):
                 raise _invalid_stream()
             self.item_ids.add(reasoning_id)
+            if transient_digest is not None:
+                self.transient_reasoning_digests.add(transient_digest)
             self.items_by_index[output_index] = _ReasoningStreamItem(
                 output_index=output_index,
                 item_id=reasoning_id,
+                provider_statusless=provider_statusless,
+                transient_encrypted_digest=transient_digest,
+            )
+            return ()
+        if item_type == "custom_tool_call":
+            custom = self._custom_item(item, status="in_progress", output_index=output_index)
+            item_id = custom["id"]
+            call_id = custom["call_id"]
+            provider_item_id = item["id"]
+            provider_call_id = item["call_id"]
+            nullable_identity = provider_item_id is None
+            identifier_collision = (
+                item_id in self.item_ids
+                or call_id in self.call_ids
+                or (
+                    nullable_identity
+                    and (
+                        item_id in self.call_ids
+                        or call_id in self.item_ids
+                        or item_id == call_id
+                        or item_id == self.identity.response_id
+                        or call_id == self.identity.response_id
+                    )
+                )
+            )
+            if (
+                self.setup_events != {"response.created", "response.in_progress"}
+                or custom["input"] != ""
+                or self.custom_call is not None
+                or identifier_collision
+                or self.text_item is not None
+                or self.tools
+                or self.compaction_count
+                or (self.max_tools is not None and self.max_tools < 1)
+                or any(not state.item_done for state in self.items_by_index.values())
+            ):
+                raise _invalid_stream()
+            self.item_ids.add(item_id)
+            self.call_ids.add(call_id)
+            custom_state = _CustomStreamItem(
+                output_index=output_index,
+                item_id=item_id,
+                call_id=call_id,
+                provider_item_id=provider_item_id,
+                provider_call_id=provider_call_id,
+                name=custom["name"],
+            )
+            self.custom_call = custom_state
+            self.items_by_index[output_index] = custom_state
+            return ()
+        if item_type == "compaction":
+            compaction, digest = self._compaction_item(item)
+            item_id = compaction["id"]
+            if (
+                not self.allow_compaction
+                or self.tools
+                or item_id in self.item_ids
+                or digest in self.encrypted_digests
+                or self.compaction_count >= 2
+                or (
+                    self.compaction_count == 0
+                    and (
+                        output_index != 0
+                        or self.setup_events != {"response.created", "response.in_progress"}
+                    )
+                )
+                or (
+                    self.compaction_count == 1
+                    and (self.text_item is None or not self.text_item.item_done)
+                )
+            ):
+                raise _invalid_stream()
+            self.item_ids.add(item_id)
+            self.encrypted_digests.add(digest)
+            self.compaction_count += 1
+            self.items_by_index[output_index] = _CompactionStreamItem(
+                output_index=output_index,
+                item_id=item_id,
+                item=compaction,
+                encrypted_digest=digest,
             )
             return ()
         raise _invalid_stream()
@@ -752,6 +1026,53 @@ class _ResponsesStreamTranslator:
         state.arguments_done = True
         return ()
 
+    def _matching_custom_event(self, event: dict[str, Any]) -> _CustomStreamItem:
+        state = self.custom_call
+        if (
+            state is None
+            or event.get("item_id") != state.provider_item_id
+            or self._validate_output_index(event) != state.output_index
+        ):
+            raise _invalid_stream()
+        return state
+
+    def _on_custom_input_delta(self, event: dict[str, Any]) -> tuple[bytes, ...]:
+        _exact_fields(
+            event,
+            {"type", "sequence_number", "output_index", "item_id", "delta"},
+            {"obfuscation"},
+        )
+        state = self._matching_custom_event(event)
+        delta = event["delta"]
+        obfuscation = event.get("obfuscation")
+        if (
+            state.input_done
+            or type(delta) is not str
+            or (
+                "obfuscation" in event
+                and (
+                    type(obfuscation) is not str
+                    or len(obfuscation.encode("utf-8", errors="strict")) > self.max_string_bytes
+                )
+            )
+            or len((state.tool_input + delta).encode("utf-8", errors="strict"))
+            > self.max_string_bytes
+        ):
+            raise _invalid_stream()
+        state.tool_input += delta
+        return ()
+
+    def _on_custom_input_done(self, event: dict[str, Any]) -> tuple[bytes, ...]:
+        _exact_fields(
+            event,
+            {"type", "sequence_number", "output_index", "item_id", "input"},
+        )
+        state = self._matching_custom_event(event)
+        if state.input_done or event["input"] != state.tool_input:
+            raise _invalid_stream()
+        state.input_done = True
+        return ()
+
     def _on_item_done(self, event: dict[str, Any]) -> tuple[bytes, ...]:
         _exact_fields(event, {"type", "output_index", "item"}, {"sequence_number"})
         output_index = self._validate_output_index(event)
@@ -760,12 +1081,51 @@ class _ResponsesStreamTranslator:
         state = self.items_by_index[output_index]
         item = event["item"]
         if isinstance(state, _ReasoningStreamItem):
-            projected_item = self._reasoning_item(item, status="completed")
-            if projected_item["id"] != state.item_id:
+            projected_item, provider_statusless, provider_digest = self._reasoning_item(
+                item, status="completed"
+            )
+            if (
+                state.item_done
+                or projected_item["id"] != state.item_id
+                or provider_statusless != state.provider_statusless
+            ):
                 raise _invalid_stream()
+            if provider_statusless:
+                if (
+                    provider_digest is None
+                    or provider_digest == state.transient_encrypted_digest
+                    or provider_digest in self.encrypted_digests
+                ):
+                    raise _invalid_stream()
+                self.encrypted_digests.add(provider_digest)
+            else:
+                encrypted_content = projected_item.get("encrypted_content")
+                if encrypted_content is not None:
+                    digest = encrypted_reasoning_data_digest(
+                        encrypted_content,
+                        max_string_bytes=self.max_string_bytes,
+                    )
+                    if digest is None or digest in self.encrypted_digests:
+                        raise _invalid_stream()
+                    self.encrypted_digests.add(digest)
+            state.item_done = True
+        elif isinstance(state, _CompactionStreamItem):
+            projected_item, digest = self._compaction_item(item)
+            if (
+                state.item_done
+                or digest != state.encrypted_digest
+                or not _json_type_exact_equal(projected_item, state.item)
+            ):
+                raise _invalid_stream()
+            state.item_done = True
         elif isinstance(state, _TextStreamItem):
             projected_item = self._message_item(item, status="completed")
-            if not state.part_done or state.item_done or projected_item["id"] != state.item_id:
+            if (
+                not state.part_done
+                or state.item_done
+                or projected_item["id"] != state.item_id
+                or (self.compaction_count == 1 and item.get("phase") != "final_answer")
+            ):
                 raise _invalid_stream()
             content = projected_item["content"]
             if len(content) != 1:
@@ -781,6 +1141,21 @@ class _ResponsesStreamTranslator:
                 or projected_item["call_id"] != state.call_id
                 or projected_item["name"] != state.name
                 or projected_item["arguments"] != state.arguments
+            ):
+                raise _invalid_stream()
+            state.item_done = True
+        elif isinstance(state, _CustomStreamItem):
+            projected_item = self._custom_item(item, status="completed", output_index=output_index)
+            if (
+                not state.input_done
+                or state.item_done
+                or type(item) is not dict
+                or item["id"] != state.provider_item_id
+                or item["call_id"] != state.provider_call_id
+                or projected_item["id"] != state.item_id
+                or projected_item["call_id"] != state.call_id
+                or projected_item["name"] != state.name
+                or projected_item["input"] != state.tool_input
             ):
                 raise _invalid_stream()
             state.item_done = True
@@ -806,11 +1181,36 @@ class _ResponsesStreamTranslator:
         ):
             raise _invalid_stream()
         if output:
+            if self.custom_tool_name is not None:
+                raise _invalid_stream()
             for index, item in enumerate(output):
                 if not _json_type_exact_equal(item, self.done_items[index]):
                     raise _invalid_stream()
         self.usage = _validate_stream_usage(usage)
-        if self.text_item is None and not self.tools:
+        if self.compaction_count and (
+            self.compaction_count != 2
+            or self.text_item is None
+            or not self.text_item.item_done
+            or self.tools
+            or self.next_output_index != 3
+            or not isinstance(self.items_by_index.get(0), _CompactionStreamItem)
+            or not isinstance(self.items_by_index.get(1), _TextStreamItem)
+            or not isinstance(self.items_by_index.get(2), _CompactionStreamItem)
+        ):
+            raise _invalid_stream()
+        if self.text_item is None and not self.tools and self.compaction_count == 0:
+            if self.custom_call is None:
+                raise _invalid_stream()
+        if self.custom_tool_name is not None and (
+            self.custom_call is None
+            or not self.custom_call.item_done
+            or self.text_item is not None
+            or self.tools
+            or self.compaction_count
+            or not isinstance(
+                self.items_by_index.get(self.custom_call.output_index), _CustomStreamItem
+            )
+        ):
             raise _invalid_stream()
         self.completed_response = dict(response)
         self.completed_response["output"] = [
@@ -858,6 +1258,8 @@ class _ResponsesStreamTranslator:
             "response.content_part.done": self._on_content_done,
             "response.function_call_arguments.delta": self._on_arguments_delta,
             "response.function_call_arguments.done": self._on_arguments_done,
+            "response.custom_tool_call_input.delta": self._on_custom_input_delta,
+            "response.custom_tool_call_input.done": self._on_custom_input_done,
             "response.output_item.done": self._on_item_done,
             "response.completed": self._on_completed,
         }
@@ -881,6 +1283,8 @@ class _ResponsesStreamTranslator:
         handler = handlers.get(event_type)
         if handler is not None:
             return handler(event)
+        if self.custom_tool_name is not None:
+            raise _invalid_stream()
         if any(token in event_type for token in ("completed", "failed", "incomplete", ".done")):
             raise _invalid_stream()
         self.unknown_events += 1
@@ -896,14 +1300,28 @@ class ResponsesStreamValidator:
         self,
         *,
         public_model: str,
+        allow_compaction: bool = False,
         max_unknown_events: int,
         max_string_bytes: int,
+        initial_item_ids: frozenset[str] = frozenset(),
+        initial_encrypted_digests: frozenset[bytes] = frozenset(),
+        custom_tool_name: str | None = None,
+        max_items: int | None = None,
+        max_tools: int | None = None,
+        initial_call_ids: frozenset[str] = frozenset(),
     ) -> None:
         self._translator = _ResponsesStreamTranslator(
             public_model=public_model,
             include_usage=False,
+            allow_compaction=allow_compaction,
             max_unknown_events=max_unknown_events,
             max_string_bytes=max_string_bytes,
+            initial_item_ids=initial_item_ids,
+            initial_encrypted_digests=initial_encrypted_digests,
+            custom_tool_name=custom_tool_name,
+            max_items=max_items,
+            max_tools=max_tools,
+            initial_call_ids=initial_call_ids,
         )
 
     def feed(self, event: ParsedSseEvent) -> None:
@@ -926,6 +1344,28 @@ class ResponsesStreamValidator:
     def completed_response(self) -> dict[str, Any] | None:
         return self._translator.completed_response
 
+    def custom_public_item(self, output_index: int, *, completed: bool) -> dict[str, Any]:
+        """Return the validated public shape for the one active custom call."""
+        state = self._translator.items_by_index.get(output_index)
+        if not isinstance(state, _CustomStreamItem):
+            raise _invalid_stream()
+        if completed and not state.item_done:
+            raise _invalid_stream()
+        return {
+            "id": state.item_id,
+            "type": "custom_tool_call",
+            "call_id": state.call_id,
+            "name": state.name,
+            "input": state.tool_input if completed else "",
+        }
+
+    def custom_public_item_id(self, output_index: int) -> str:
+        """Return the normalized public item id for a validated custom input event."""
+        state = self._translator.items_by_index.get(output_index)
+        if not isinstance(state, _CustomStreamItem):
+            raise _invalid_stream()
+        return state.item_id
+
 
 async def translate_responses_sse(
     chunks: AsyncIterator[bytes],
@@ -942,6 +1382,7 @@ async def translate_responses_sse(
     translator = _ResponsesStreamTranslator(
         public_model=public_model,
         include_usage=include_usage,
+        allow_compaction=False,
         max_unknown_events=max_json_nodes,
         max_string_bytes=max_string_bytes,
     )

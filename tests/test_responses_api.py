@@ -224,6 +224,31 @@ async def test_malformed_request_matrix_never_resolves_credentials(
 
 
 @pytest.mark.asyncio
+async def test_max_output_tokens_is_rejected_generically_before_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(_settings(tmp_path), NeverCredentialManager(), upstream=FakeUpstream([]))
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return {"model": "codex", "input": "hello", "max_output_tokens": 42}
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    response = await app_module._responses(cast(Any, SimpleNamespace(app=app)))
+    assert isinstance(response.body, (bytes, bytearray))
+
+    assert response.status == 400
+    assert json.loads(response.body) == {
+        "error": {
+            "message": "Request is invalid",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "invalid_request",
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_credential_failure_is_sanitized_without_upstream(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -264,6 +289,284 @@ def _parse_request(
     )
 
 
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "xhigh", "max"])
+def test_reasoning_effort_accepts_only_confirmed_values_and_is_preserved(effort: str) -> None:
+    parsed = _parse_request({"model": "codex", "input": "hello", "reasoning": {"effort": effort}})
+
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload["reasoning"] == {"effort": effort}
+    for rejected in ("minimal", "", "MAX", "unknown", True, None):
+        with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+            _parse_request({"model": "codex", "input": "hello", "reasoning": {"effort": rejected}})
+
+
+@pytest.mark.parametrize("summary", ["auto", "concise", "detailed"])
+def test_reasoning_summary_accepts_only_confirmed_values_and_is_preserved(summary: str) -> None:
+    parsed = _parse_request({"model": "codex", "input": "hello", "reasoning": {"summary": summary}})
+
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload["reasoning"] == {"summary": summary}
+    for rejected in ("none", "", "DETAILED", "unknown", True, None):
+        with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+            _parse_request({"model": "codex", "input": "hello", "reasoning": {"summary": rejected}})
+
+
+def test_prompt_cache_key_is_a_bounded_exact_string_and_is_preserved() -> None:
+    parsed = _parse_request({"model": "codex", "input": "hello", "prompt_cache_key": "cache-東京"})
+
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload["prompt_cache_key"] == "cache-東京"
+    rejected_cache_keys: tuple[object, ...] = (True, 1, None, [], {})
+    for rejected in rejected_cache_keys:
+        with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+            _parse_request({"model": "codex", "input": "hello", "prompt_cache_key": rejected})
+    sensitive_cache_key = "SENSITIVE_CACHE_KEY_" + "x" * 4096
+    with pytest.raises(ResponsesRequestError) as caught:
+        _parse_request(
+            {"model": "codex", "input": "hello", "prompt_cache_key": sensitive_cache_key}
+        )
+    assert caught.value.args == ("invalid request",)
+    assert "SENSITIVE" not in repr(caught.value)
+
+
+@pytest.mark.parametrize("include_obfuscation", [False, True])
+def test_stream_options_accepts_only_exact_include_obfuscation_boolean(
+    include_obfuscation: bool,
+) -> None:
+    parsed = _parse_request(
+        {
+            "model": "codex",
+            "input": "hello",
+            "stream": True,
+            "stream_options": {"include_obfuscation": include_obfuscation},
+        }
+    )
+
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload["stream_options"] == {"include_obfuscation": include_obfuscation}
+    rejected_stream_options: tuple[object, ...] = (
+        {},
+        {"include_obfuscation": 1},
+        {"include_obfuscation": None},
+        {"include_obfuscation": True, "include_usage": True},
+        True,
+        None,
+    )
+    for rejected in rejected_stream_options:
+        with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+            _parse_request(
+                {
+                    "model": "codex",
+                    "input": "hello",
+                    "stream": True,
+                    "stream_options": rejected,
+                }
+            )
+
+
+@pytest.mark.parametrize("stream", [None, False])
+def test_stream_options_requires_stream_true(stream: bool | None) -> None:
+    document: dict[str, object] = {
+        "model": "codex",
+        "input": "hello",
+        "stream_options": {"include_obfuscation": True},
+    }
+    if stream is not None:
+        document["stream"] = stream
+
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _parse_request(document)
+
+
+@pytest.mark.parametrize("verbosity", ["low", "medium", "high"])
+def test_text_verbosity_accepts_only_confirmed_values_and_is_preserved(verbosity: str) -> None:
+    parsed = _parse_request({"model": "codex", "input": "hello", "text": {"verbosity": verbosity}})
+
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload["text"] == {"verbosity": verbosity}
+    for rejected in ("minimal", "", "HIGH", "unknown", True, None):
+        with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+            _parse_request({"model": "codex", "input": "hello", "text": {"verbosity": rejected}})
+
+
+def test_service_tier_accepts_only_default_and_is_preserved() -> None:
+    parsed = _parse_request({"model": "codex", "input": "hello", "service_tier": "default"})
+
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload["service_tier"] == "default"
+    for rejected in ("auto", "flex", "priority", "", "DEFAULT", True, None):
+        with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+            _parse_request({"model": "codex", "input": "hello", "service_tier": rejected})
+
+
+def test_context_management_accepts_one_bounded_compaction_entry_and_forwards_exactly() -> None:
+    for threshold in (1, 1024, 1_000_000):
+        context_management = [{"type": "compaction", "compact_threshold": threshold}]
+        parsed = _parse_request(
+            {
+                "model": "codex",
+                "input": "hello",
+                "context_management": context_management,
+            }
+        )
+
+        payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+        assert payload["context_management"] == context_management
+        assert payload["model"] == "gpt-upstream"
+        assert payload["store"] is False
+        assert payload["stream"] is False
+        assert payload["include"] == ["reasoning.encrypted_content"]
+
+    rejected_context_management: tuple[object, ...] = (
+        None,
+        True,
+        {},
+        [],
+        [{"type": "compaction", "compact_threshold": True}],
+        [{"type": "compaction", "compact_threshold": 0}],
+        [{"type": "compaction", "compact_threshold": -1}],
+        [{"type": "compaction", "compact_threshold": 1_000_001}],
+        [{"type": "compaction", "compact_threshold": "1024"}],
+        [{"type": "other", "compact_threshold": 1024}],
+        [{"type": "compaction"}],
+        [{"type": "compaction", "compact_threshold": 1024, "secret": "SENSITIVE"}],
+        [
+            {"type": "compaction", "compact_threshold": 1024},
+            {"type": "compaction", "compact_threshold": 2048},
+        ],
+    )
+    for rejected in rejected_context_management:
+        with pytest.raises(ResponsesRequestError) as caught:
+            _parse_request({"model": "codex", "input": "hello", "context_management": rejected})
+        assert caught.value.args == ("invalid request",)
+        assert "SENSITIVE" not in repr(caught.value)
+
+
+def test_developer_input_text_is_preserved_separately_from_top_level_instructions() -> None:
+    parsed = _parse_request(
+        {
+            "model": "codex",
+            "instructions": "top-level policy",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "developer policy"}],
+                },
+                {"role": "user", "content": "question"},
+            ],
+        }
+    )
+
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload["instructions"] == "top-level policy"
+    assert payload["input"] == [
+        {
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "developer policy"}],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "question"}]},
+    ]
+    for rejected in (
+        {"role": "system", "content": [{"type": "input_text", "text": "policy"}]},
+        {"role": "developer", "content": "policy"},
+        {"role": "developer", "content": [{"type": "output_text", "text": "policy"}]},
+    ):
+        with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+            _parse_request({"model": "codex", "input": [rejected]})
+
+
+@pytest.mark.parametrize("status", ["completed", "in_progress", "incomplete"])
+def test_assistant_message_status_accepts_only_confirmed_values_and_is_preserved(
+    status: str,
+) -> None:
+    message = {
+        "id": "msg_history",
+        "type": "message",
+        "status": status,
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "prior answer", "annotations": []}],
+    }
+    parsed = _parse_request(
+        {"model": "codex", "input": [message, {"role": "user", "content": "continue"}]}
+    )
+
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload["input"][0] == {
+        "role": "assistant",
+        "status": status,
+        "content": [{"type": "output_text", "text": "prior answer"}],
+    }
+    for rejected in ("failed", "queued", "", "COMPLETED", True, None):
+        invalid = {**message, "status": rejected}
+        with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+            _parse_request({"model": "codex", "input": [invalid]})
+
+
+def test_assistant_message_accepts_live_shape_without_id_or_annotations() -> None:
+    parsed = _parse_request(
+        {
+            "model": "codex",
+            "input": [
+                {
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "prior note"}],
+                },
+                {"role": "user", "content": "continue"},
+            ],
+        }
+    )
+
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload["input"][0] == {
+        "role": "assistant",
+        "status": "completed",
+        "phase": "commentary",
+        "content": [{"type": "output_text", "text": "prior note"}],
+    }
+
+
+@pytest.mark.parametrize("phase", ["commentary", "final_answer"])
+def test_assistant_message_phase_accepts_only_confirmed_values_and_is_preserved(
+    phase: str,
+) -> None:
+    message = {
+        "id": "msg_history",
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "phase": phase,
+        "content": [{"type": "output_text", "text": "prior answer", "annotations": []}],
+    }
+    parsed = _parse_request({"model": "codex", "input": [message]})
+
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload["input"][0] == {
+        "role": "assistant",
+        "status": "completed",
+        "phase": phase,
+        "content": [{"type": "output_text", "text": "prior answer"}],
+    }
+    for rejected in ("analysis", "final", "", "COMMENTARY", True, None):
+        invalid = {**message, "phase": rejected}
+        with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+            _parse_request({"model": "codex", "input": [invalid]})
+
+
 def test_request_options_reuse_closed_chat_contracts_and_reconstruct_exact_policy() -> None:
     schema = {
         "title": "AnswerResult",
@@ -279,7 +582,6 @@ def test_request_options_reuse_closed_chat_contracts_and_reconstruct_exact_polic
         "store": False,
         "stream": False,
         "include": ["reasoning.encrypted_content"],
-        "max_output_tokens": 42,
         "tools": [
             {
                 "type": "function",
@@ -348,6 +650,364 @@ def test_request_options_reuse_closed_chat_contracts_and_reconstruct_exact_polic
     }
 
 
+def test_custom_tool_request_forwards_exact_confirmed_named_policy() -> None:
+    document = {
+        "model": "codex",
+        "input": "emit a probe",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "emit_probe",
+                "description": "Emit the supplied probe text",
+            }
+        ],
+        "tool_choice": {"type": "custom", "name": "emit_probe"},
+        "parallel_tool_calls": False,
+    }
+
+    parsed = _parse_request(document)
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload == {
+        "model": "gpt-upstream",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "emit a probe"}],
+            }
+        ],
+        "store": False,
+        "stream": False,
+        "include": ["reasoning.encrypted_content"],
+        "tools": [
+            {
+                "type": "custom",
+                "name": "emit_probe",
+                "description": "Emit the supplied probe text",
+            }
+        ],
+        "tool_choice": {"type": "custom", "name": "emit_probe"},
+        "parallel_tool_calls": False,
+    }
+
+
+def test_custom_tool_description_is_optional_without_broadening_its_shape() -> None:
+    policy = _custom_tool_policy()
+    policy["tools"] = [{"type": "custom", "name": "emit_probe"}]
+
+    parsed = _parse_request({"model": "codex", "input": "hello", **policy})
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert payload["tools"] == [{"type": "custom", "name": "emit_probe"}]
+
+
+def _custom_tool_policy(name: str = "emit_probe") -> dict[str, object]:
+    return {
+        "tools": [{"type": "custom", "name": name, "description": "Emit probe text"}],
+        "tool_choice": {"type": "custom", "name": name},
+        "parallel_tool_calls": False,
+    }
+
+
+def test_custom_tool_output_continuation_forwards_none_choice_and_accepts_message() -> None:
+    policy = _custom_tool_policy()
+    policy["tool_choice"] = "none"
+    document = {
+        "model": "codex",
+        "input": [
+            {
+                "id": "ctc_history",
+                "type": "custom_tool_call",
+                "call_id": "call_history",
+                "name": "emit_probe",
+                "input": "probe text",
+            },
+            {
+                "id": "ctco_history",
+                "type": "custom_tool_call_output",
+                "call_id": "call_history",
+                "output": "probe result",
+            },
+        ],
+        **policy,
+    }
+
+    parsed = _parse_request(document)
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+    public = _public_response_for(document, _text_response())
+
+    assert payload["input"] == [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_history",
+            "name": "emit_probe",
+            "input": "probe text",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_history",
+            "output": "probe result",
+        },
+    ]
+    assert payload["tool_choice"] == "none"
+    assert public["tool_choice"] == "none"
+    assert public["output"][0]["type"] == "message"
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"tools": [{"type": "custom", "name": "emit_probe"}]},
+        {
+            "tools": [{"type": "custom", "name": "emit_probe"}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+        },
+        {
+            "tools": [{"type": "custom", "name": "emit_probe"}],
+            "tool_choice": {"type": "custom", "name": "other"},
+            "parallel_tool_calls": False,
+        },
+        {
+            "tools": [{"type": "custom", "name": "emit_probe"}],
+            "tool_choice": {"type": "custom", "name": "emit_probe"},
+        },
+        {
+            "tools": [{"type": "custom", "name": "emit_probe"}],
+            "tool_choice": {"type": "custom", "name": "emit_probe"},
+            "parallel_tool_calls": True,
+        },
+        {
+            **_custom_tool_policy(),
+            "tools": [
+                {"type": "custom", "name": "emit_probe"},
+                {"type": "custom", "name": "other"},
+            ],
+        },
+        {
+            **_custom_tool_policy(),
+            "tools": [
+                {"type": "custom", "name": "emit_probe"},
+                {
+                    "type": "function",
+                    "name": "allowed",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            ],
+        },
+        {
+            **_custom_tool_policy(),
+            "tools": [{"type": "custom", "name": "emit_probe", "format": {}}],
+        },
+        {
+            **_custom_tool_policy(),
+            "tools": [{"type": "custom", "name": "emit_probe", "allowed_callers": ["code"]}],
+        },
+        {
+            **_custom_tool_policy(),
+            "tools": [{"type": "custom", "name": "emit_probe", "defer_loading": False}],
+        },
+    ],
+)
+def test_custom_tool_declaration_rejects_authority_expansion(
+    policy: dict[str, object],
+) -> None:
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _parse_request({"model": "codex", "input": "hello", **policy})
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_one",
+                "name": "emit_probe",
+                "input": "probe",
+            }
+        ],
+        [
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_one",
+                "output": "result",
+            }
+        ],
+        [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_one",
+                "name": "other",
+                "input": "probe",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_one",
+                "output": "result",
+            },
+        ],
+        [
+            {
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_one",
+                "name": "emit_probe",
+                "input": "probe",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_one",
+                "output": "result",
+            },
+        ],
+        [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_one",
+                "name": "emit_probe",
+                "input": "probe",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "status": "completed",
+                "call_id": "call_one",
+                "output": "result",
+            },
+        ],
+        [
+            {
+                "id": "duplicate",
+                "type": "custom_tool_call",
+                "call_id": "call_one",
+                "name": "emit_probe",
+                "input": "probe",
+            },
+            {
+                "id": "duplicate",
+                "type": "custom_tool_call_output",
+                "call_id": "call_one",
+                "output": "result",
+            },
+        ],
+        [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_one",
+                "name": "emit_probe",
+                "input": "probe",
+            },
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_two",
+                "name": "emit_probe",
+                "input": "probe two",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_one",
+                "output": "result",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_two",
+                "output": "result two",
+            },
+        ],
+        [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_one",
+                "name": "emit_probe",
+                "input": "probe",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_two",
+                "output": "result",
+            },
+        ],
+        [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_one",
+                "name": "emit_probe",
+                "input": "probe",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_one",
+                "output": "result",
+            },
+            {"role": "user", "content": "continue"},
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_one",
+                "name": "emit_probe",
+                "input": "probe again",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_one",
+                "output": "second result",
+            },
+        ],
+        [
+            {
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+            },
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_one",
+                "name": "emit_probe",
+                "input": "probe",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_one",
+                "output": "result",
+            },
+        ],
+        [
+            {
+                "type": "function_call",
+                "call_id": "call_one",
+                "name": "emit_probe",
+                "arguments": "{}",
+            },
+            {"type": "function_call_output", "call_id": "call_one", "output": "result"},
+        ],
+    ],
+)
+def test_custom_tool_replay_rejects_malformed_or_ambiguous_pairing(items: object) -> None:
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _parse_request(
+            {
+                "model": "codex",
+                "input": items,
+                **_custom_tool_policy(),
+            }
+        )
+
+
+def test_custom_tool_replay_requires_its_exact_declaration() -> None:
+    items = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_one",
+            "name": "emit_probe",
+            "input": "probe",
+        },
+        {"type": "custom_tool_call_output", "call_id": "call_one", "output": "result"},
+    ]
+
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _parse_request({"model": "codex", "input": items})
+
+
 @pytest.mark.parametrize("data", ["YQ==", "YQ", "++8=", "--8"])
 def test_direct_responses_reasoning_accepts_strict_base64_variants(data: str) -> None:
     parsed = _parse_request(
@@ -376,6 +1036,173 @@ def test_direct_responses_reasoning_accepts_strict_base64_variants(data: str) ->
     assert payload["input"][0] == {"type": "reasoning", "encrypted_content": data}
 
 
+def test_compaction_checkpoint_replay_is_exact_bounded_and_shares_digest_authority() -> None:
+    context_management = [{"type": "compaction", "compact_threshold": 1024}]
+    for item, expected in (
+        (
+            {"type": "compaction", "encrypted_content": "YQ=="},
+            {"type": "compaction", "encrypted_content": "YQ=="},
+        ),
+        (
+            {"type": "compaction", "id": None, "encrypted_content": "YQ=="},
+            {"type": "compaction", "encrypted_content": "YQ=="},
+        ),
+        (
+            {"type": "compaction", "id": "cmp_history", "encrypted_content": "YQ=="},
+            {
+                "type": "compaction",
+                "id": "cmp_history",
+                "encrypted_content": "YQ==",
+            },
+        ),
+    ):
+        parsed = _parse_request(
+            {
+                "model": "codex",
+                "input": [item, {"role": "user", "content": "continue"}],
+                "context_management": context_management,
+            }
+        )
+
+        payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+        assert payload["input"][0] == expected
+        assert payload["context_management"] == context_management
+
+    malformed_items: tuple[object, ...] = (
+        {"type": "compaction"},
+        {"type": "compaction", "encrypted_content": None},
+        {"type": "compaction", "encrypted_content": "AB"},
+        {"type": "compaction", "encrypted_content": "YQ==", "id": True},
+        {"type": "compaction", "encrypted_content": "YQ==", "id": ""},
+        {"type": "compaction", "encrypted_content": "YQ==", "id": "x" * 129},
+        {
+            "type": "compaction",
+            "encrypted_content": "YQ==",
+            "plaintext": "SENSITIVE_CHECKPOINT",
+        },
+    )
+    for malformed in malformed_items:
+        with pytest.raises(ResponsesRequestError) as caught:
+            _parse_request(
+                {
+                    "model": "codex",
+                    "input": [malformed],
+                    "context_management": context_management,
+                }
+            )
+        assert caught.value.args == ("invalid request",)
+        assert "SENSITIVE" not in repr(caught.value)
+
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _parse_request(
+            {
+                "model": "codex",
+                "input": [{"type": "compaction", "encrypted_content": "YQ=="}],
+            }
+        )
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _parse_request(
+            {
+                "model": "codex",
+                "input": [
+                    {
+                        "id": "rs_history",
+                        "type": "reasoning",
+                        "status": "completed",
+                        "summary": [],
+                        "encrypted_content": "++8=",
+                    },
+                    {"type": "compaction", "encrypted_content": "--8"},
+                ],
+                "context_management": context_management,
+            }
+        )
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _parse_request(
+            {
+                "model": "codex",
+                "input": [
+                    {
+                        "id": "msg_history",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+                    },
+                    {"type": "compaction", "encrypted_content": "YQ=="},
+                ],
+                "context_management": context_management,
+            }
+        )
+
+
+def test_compaction_replay_accepts_live_checkpoint_message_checkpoint_sequence() -> None:
+    context_management = [{"type": "compaction", "compact_threshold": 1024}]
+    document = {
+        "model": "codex",
+        "input": [
+            {"type": "compaction", "id": "cmp_before", "encrypted_content": "YQ=="},
+            {
+                "id": "msg_history",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+            },
+            {"type": "compaction", "id": "cmp_after", "encrypted_content": "Yg=="},
+            {"role": "user", "content": "continue"},
+        ],
+        "context_management": context_management,
+    }
+
+    parsed = _parse_request(document)
+    payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
+
+    assert [item.get("type", "message") for item in payload["input"]] == [
+        "compaction",
+        "message",
+        "compaction",
+        "message",
+    ]
+    assert payload["context_management"] == context_management
+
+    consecutive = {**document, "input": [document["input"][0], document["input"][2]]}
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _parse_request(consecutive)
+
+
+@pytest.mark.parametrize(
+    ("status", "phase"),
+    [("in_progress", "final_answer"), ("completed", "commentary")],
+)
+def test_compaction_replay_requires_completed_final_answer_before_closing_checkpoint(
+    status: str,
+    phase: str,
+) -> None:
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _parse_request(
+            {
+                "model": "codex",
+                "input": [
+                    {"type": "compaction", "id": "cmp_before", "encrypted_content": "YQ=="},
+                    {
+                        "id": "msg_history",
+                        "type": "message",
+                        "status": status,
+                        "role": "assistant",
+                        "phase": phase,
+                        "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+                    },
+                    {"type": "compaction", "id": "cmp_after", "encrypted_content": "Yg=="},
+                    {"role": "user", "content": "continue"},
+                ],
+                "context_management": [{"type": "compaction", "compact_threshold": 1024}],
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "document",
     [
@@ -398,12 +1225,26 @@ def test_direct_responses_reasoning_accepts_strict_base64_variants(data: str) ->
         {"model": "codex", "input": "x", "instructions": None},
         {"model": "codex", "input": "x", "max_output_tokens": True},
         {"model": "codex", "input": "x", "max_output_tokens": 0},
+        {"model": "codex", "input": "x", "truncation": "auto"},
+        {"model": "codex", "input": "x", "reasoning": {}},
+        {"model": "codex", "input": "x", "reasoning": {"effort": "minimal"}},
+        {
+            "model": "codex",
+            "input": "x",
+            "reasoning": {"effort": "low", "unknown": "SENSITIVE"},
+        },
         {
             "model": "codex",
             "input": "x",
             "tools": [{"type": "web_search_preview"}],
         },
         {"model": "codex", "input": "x", "text": {"format": {"type": "text"}}},
+        {"model": "codex", "input": "x", "text": {}},
+        {
+            "model": "codex",
+            "input": "x",
+            "text": {"verbosity": "low", "unknown": "SENSITIVE"},
+        },
         {
             "model": "codex",
             "input": [{"role": "assistant", "content": "not an output item"}],
@@ -420,6 +1261,46 @@ def test_malformed_or_authority_expanding_requests_fail_generically(document: ob
 
     assert caught.value.args == ("invalid request",)
     assert "SENSITIVE" not in repr(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("tools", "tool_choice", "parallel_tool_calls"),
+    [
+        (
+            [
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "parameters": {"type": "object", "additionalProperties": False},
+                    "strict": True,
+                }
+            ],
+            "auto",
+            True,
+        ),
+        (
+            [{"type": "custom", "name": "emit_probe"}],
+            {"type": "custom", "name": "emit_probe"},
+            False,
+        ),
+    ],
+)
+def test_context_management_rejects_unproven_tool_combinations(
+    tools: list[dict[str, object]],
+    tool_choice: object,
+    parallel_tool_calls: bool,
+) -> None:
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _parse_request(
+            {
+                "model": "codex",
+                "input": "hello",
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "parallel_tool_calls": parallel_tool_calls,
+                "context_management": [{"type": "compaction", "compact_threshold": 1024}],
+            }
+        )
 
 
 def test_request_depth_nodes_and_cumulative_strings_use_exact_existing_budgets() -> None:
@@ -511,7 +1392,7 @@ def test_reasoning_and_tool_history_ambiguity_or_bad_association_fails(items: ob
 
 
 @pytest.mark.asyncio
-async def test_two_request_output_history_round_trip_is_deterministic_and_not_authenticated(
+async def test_two_request_output_history_round_trip_preserves_summary_but_replays_only_ciphertext(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -569,7 +1450,12 @@ async def test_two_request_output_history_round_trip_is_deterministic_and_not_au
         "strict": True,
     }
     documents: list[dict[str, object]] = [
-        {"model": "codex", "input": "Weather?", "tools": [tool]},
+        {
+            "model": "codex",
+            "input": "Weather?",
+            "tools": [tool],
+            "reasoning": {"summary": "auto"},
+        },
     ]
 
     async def read_document(_request: Any, **_kwargs: Any) -> object:
@@ -605,10 +1491,9 @@ async def test_two_request_output_history_round_trip_is_deterministic_and_not_au
         "id": "rs_first",
         "type": "reasoning",
         "status": "completed",
-        "summary": [],
+        "summary": [{"type": "summary_text", "text": "PRIVATE REASONING SUMMARY"}],
         "encrypted_content": "YQ==",
     }
-    assert "PRIVATE" not in repr(first_body)
     assert second_body["model"] == "codex"
     assert manager.calls == [False, False]
     # Responses IDs satisfy the SDK schema but carry no bridge authenticity and are stripped
@@ -618,6 +1503,7 @@ async def test_two_request_output_history_round_trip_is_deterministic_and_not_au
         {"type": "reasoning", "encrypted_content": "YQ=="},
         {
             "role": "assistant",
+            "status": "completed",
             "content": [{"type": "output_text", "text": "Checking."}],
         },
         {
@@ -659,6 +1545,134 @@ def _public_response(value: object, **limits: int) -> dict[str, Any]:
     return _public_response_for({"model": "codex", "input": "hello"}, value, **limits)
 
 
+def test_nonstream_rejects_unsolicited_reasoning_summary() -> None:
+    upstream = _text_response("done")
+    upstream["output"].insert(
+        0,
+        {
+            "id": "rs_unsolicited",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": "UNSOLICITED SUMMARY"}],
+            "encrypted_content": "YQ==",
+        },
+    )
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$") as caught:
+        _public_response(upstream)
+
+    assert "UNSOLICITED SUMMARY" not in repr(caught.value)
+
+
+def test_nonstream_compaction_output_is_exact_bounded_and_fail_closed() -> None:
+    context_management = [{"type": "compaction", "compact_threshold": 1024}]
+    document = {
+        "model": "codex",
+        "input": "hello",
+        "context_management": context_management,
+    }
+    checkpoint = {
+        "id": "cmp_public_contract",
+        "type": "compaction",
+        "encrypted_content": "YQ==",
+    }
+    value = _text_response()
+    value["output"] = [checkpoint]
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _public_response_for(document, value)
+    ordinary = _public_response(_text_response())
+    assert Response.model_validate(ordinary).output[0].type == "message"
+
+    malformed_checkpoints: tuple[object, ...] = (
+        {"type": "compaction", "encrypted_content": "YQ=="},
+        {"id": None, "type": "compaction", "encrypted_content": "YQ=="},
+        {"id": "", "type": "compaction", "encrypted_content": "YQ=="},
+        {"id": "x" * 129, "type": "compaction", "encrypted_content": "YQ=="},
+        {"id": "cmp_bad", "type": "compaction", "encrypted_content": None},
+        {"id": "cmp_bad", "type": "compaction", "encrypted_content": "AB"},
+        {
+            "id": "cmp_bad",
+            "type": "compaction",
+            "encrypted_content": "YQ==",
+            "plaintext": "SENSITIVE_CHECKPOINT",
+        },
+    )
+    for malformed in malformed_checkpoints:
+        invalid = _text_response()
+        invalid["output"].insert(0, malformed)
+        with pytest.raises(UpstreamResponseError) as caught:
+            _public_response_for(document, invalid)
+        assert caught.value.args == ("invalid upstream response",)
+        assert "SENSITIVE" not in repr(caught.value)
+
+    without_opt_in = _text_response()
+    without_opt_in["output"].insert(0, checkpoint)
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _public_response(without_opt_in)
+
+    duplicate_id = _text_response()
+    duplicate_id["output"].insert(0, {**checkpoint, "id": "msg_public_contract"})
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _public_response_for(document, duplicate_id)
+
+    historical_document = {
+        "model": "codex",
+        "input": [
+            {"type": "compaction", "id": "cmp_history", "encrypted_content": "++8="},
+            {"role": "user", "content": "continue"},
+        ],
+        "context_management": context_management,
+    }
+    duplicate_digest = _text_response()
+    duplicate_digest["output"].insert(
+        0,
+        {"id": "cmp_new", "type": "compaction", "encrypted_content": "--8"},
+    )
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _public_response_for(historical_document, duplicate_digest)
+
+    late = _text_response()
+    late["output"].append(checkpoint)
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _public_response_for(document, late)
+
+
+def test_nonstream_compaction_output_accepts_live_checkpoint_message_checkpoint_sequence() -> None:
+    document = {
+        "model": "codex",
+        "input": "hello",
+        "context_management": [{"type": "compaction", "compact_threshold": 1024}],
+    }
+    checkpoints = [
+        {"id": "cmp_one", "type": "compaction", "encrypted_content": "YQ=="},
+        {"id": "cmp_two", "type": "compaction", "encrypted_content": "Yg=="},
+    ]
+    mixed = _text_response()
+    mixed["output"][0]["phase"] = "final_answer"
+    mixed["output"] = [checkpoints[0], mixed["output"][0], checkpoints[1]]
+
+    public = _public_response_for(document, mixed)
+
+    assert [item["type"] for item in public["output"]] == [
+        "compaction",
+        "message",
+        "compaction",
+    ]
+    assert public["output"][1]["phase"] == "final_answer"
+
+    consecutive = _text_response()
+    consecutive["output"] = checkpoints
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _public_response_for(document, consecutive)
+
+    for truncated in ([mixed["output"][0]], mixed["output"][:2]):
+        invalid = _text_response()
+        invalid["output"] = truncated
+        with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+            _public_response_for(document, invalid)
+
+
 def _function_item(
     *,
     item_id: str = "fc_one",
@@ -673,6 +1687,176 @@ def _function_item(
         "name": name,
         "arguments": "{}",
     }
+
+
+def _custom_item(
+    *,
+    item_id: object = "ctc_one",
+    call_id: object = "call_one",
+    name: object = "emit_probe",
+    status: object = "completed",
+    tool_input: object = "probe text",
+) -> dict[str, object]:
+    return {
+        "id": item_id,
+        "type": "custom_tool_call",
+        "status": status,
+        "call_id": call_id,
+        "name": name,
+        "input": tool_input,
+    }
+
+
+def test_nonstream_custom_tool_call_projects_sdk_common_public_shape() -> None:
+    document = {"model": "codex", "input": "hello", **_custom_tool_policy()}
+    value = _text_response()
+    value["output"] = [_custom_item()]
+
+    public = _public_response_for(document, value)
+
+    assert public["output"] == [
+        {
+            "id": "ctc_one",
+            "type": "custom_tool_call",
+            "call_id": "call_one",
+            "name": "emit_probe",
+            "input": "probe text",
+        }
+    ]
+    assert public["tools"] == [
+        {"type": "custom", "name": "emit_probe", "description": "Emit probe text"}
+    ]
+    assert public["tool_choice"] == {"type": "custom", "name": "emit_probe"}
+    assert public["parallel_tool_calls"] is False
+    parsed = Response.model_validate(public)
+    assert parsed.output[0].type == "custom_tool_call"
+
+
+def test_nonstream_reasoning_may_precede_the_single_custom_tool_call() -> None:
+    document = {"model": "codex", "input": "hello", **_custom_tool_policy()}
+    value = _text_response()
+    value["output"] = [
+        {
+            "id": "rs_custom",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [],
+            "encrypted_content": "YQ==",
+        },
+        _custom_item(),
+    ]
+
+    public = _public_response_for(document, value)
+
+    assert [item["type"] for item in public["output"]] == ["reasoning", "custom_tool_call"]
+
+
+def test_custom_tool_output_replay_requires_none_choice_for_normal_message() -> None:
+    document = {
+        "model": "codex",
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_history",
+                "name": "emit_probe",
+                "input": "probe",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_history",
+                "output": "result",
+            },
+        ],
+        **_custom_tool_policy(),
+    }
+
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _public_response_for(document, _text_response("finished"))
+
+
+def test_earlier_custom_output_does_not_relax_a_later_named_custom_request() -> None:
+    document = {
+        "model": "codex",
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_history",
+                "name": "emit_probe",
+                "input": "probe",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_history",
+                "output": "result",
+            },
+            {"role": "user", "content": "run it again"},
+        ],
+        **_custom_tool_policy(),
+    }
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _public_response_for(document, _text_response("should have called the tool"))
+
+
+@pytest.mark.parametrize(
+    "document,output",
+    [
+        ({"model": "codex", "input": "hello"}, [_custom_item()]),
+        (
+            {"model": "codex", "input": "hello", **_custom_tool_policy()},
+            [_custom_item(name="other")],
+        ),
+        (
+            {"model": "codex", "input": "hello", **_custom_tool_policy()},
+            [_custom_item(item_id=None)],
+        ),
+        (
+            {"model": "codex", "input": "hello", **_custom_tool_policy()},
+            [_custom_item(call_id=None)],
+        ),
+        (
+            {"model": "codex", "input": "hello", **_custom_tool_policy()},
+            [_custom_item(status="in_progress")],
+        ),
+        (
+            {"model": "codex", "input": "hello", **_custom_tool_policy()},
+            [{key: value for key, value in _custom_item().items() if key != "status"}],
+        ),
+        (
+            {"model": "codex", "input": "hello", **_custom_tool_policy()},
+            [{**_custom_item(), "unexpected": "SENSITIVE"}],
+        ),
+        (
+            {"model": "codex", "input": "hello", **_custom_tool_policy()},
+            [_custom_item(tool_input=None)],
+        ),
+        (
+            {"model": "codex", "input": "hello", **_custom_tool_policy()},
+            [_custom_item(), _custom_item(item_id="ctc_two", call_id="call_two")],
+        ),
+        (
+            {"model": "codex", "input": "hello", **_custom_tool_policy()},
+            [_custom_item(), *_text_response()["output"]],
+        ),
+        (
+            {"model": "codex", "input": "hello", **_custom_tool_policy()},
+            [_custom_item(), _function_item(item_id="fc_two", call_id="call_two")],
+        ),
+        (
+            {"model": "codex", "input": "hello", **_custom_tool_policy()},
+            _text_response()["output"],
+        ),
+    ],
+)
+def test_nonstream_custom_output_enforces_declared_request_policy(
+    document: object,
+    output: list[object],
+) -> None:
+    value = _text_response()
+    value["output"] = output
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        _public_response_for(document, value)
 
 
 def _function_tool(name: str = "allowed") -> dict[str, Any]:

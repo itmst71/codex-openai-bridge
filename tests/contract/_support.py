@@ -15,6 +15,7 @@ from openai import AsyncOpenAI
 from codex_openai_bridge.app import create_app
 from codex_openai_bridge.auth import Credential
 from codex_openai_bridge.config import Settings
+from codex_openai_bridge.upstream import BufferedResponsesUpstream
 
 CLIENT_TOKEN = "c" * 43
 PUBLIC_MODEL = "codex"
@@ -90,6 +91,9 @@ class RecordingUpstream:
         self.byte_streams.append(stream)
         return stream
 
+    async def aclose(self) -> None:
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class RunningContractServer:
@@ -105,6 +109,7 @@ async def contract_server(
     *,
     responses: list[object] | None = None,
     streams: list[bytes] | None = None,
+    buffered_nonstream: bool = False,
 ) -> AsyncIterator[RunningContractServer]:
     token_file = tmp_path / "contract-client-token"
     token_file.write_text(CLIENT_TOKEN + "\n", encoding="ascii")
@@ -118,7 +123,8 @@ async def contract_server(
     )
     upstream = RecordingUpstream(responses=responses, streams=streams)
     provider = StaticCredentialProvider()
-    server = TestServer(create_app(settings, provider, upstream=upstream))
+    app_upstream = BufferedResponsesUpstream(upstream, settings) if buffered_nonstream else upstream
+    server = TestServer(create_app(settings, provider, upstream=app_upstream))
     await server.start_server()
     client = AsyncOpenAI(
         api_key=CLIENT_TOKEN,
@@ -143,21 +149,23 @@ def completed_text_response(
     *,
     response_id: str = "resp_contract",
     message_id: str = "msg_contract",
+    phase: str | None = None,
 ) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "id": message_id,
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+    if phase is not None:
+        message["phase"] = phase
     return {
         "id": response_id,
         "object": "response",
         "created_at": 1_723_456_789,
         "status": "completed",
-        "output": [
-            {
-                "id": message_id,
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            }
-        ],
+        "output": [message],
         "usage": {
             "input_tokens": 3,
             "input_tokens_details": {"cached_tokens": 0},
@@ -206,7 +214,253 @@ def completed_tool_response(*, include_reasoning: bool = False) -> dict[str, Any
     }
 
 
-def strict_text_sse(text: str = "streamed text") -> bytes:
+def completed_custom_tool_response() -> dict[str, Any]:
+    return {
+        "id": "resp_custom_contract",
+        "object": "response",
+        "created_at": 1_723_456_792,
+        "status": "completed",
+        "output": [
+            {
+                "id": "ctc_contract",
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_custom_contract",
+                "name": "emit_probe",
+                "input": "contract probe",
+            }
+        ],
+        "usage": {
+            "input_tokens": 3,
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 1},
+            "output_tokens": 4,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 7,
+        },
+    }
+
+
+def completed_compaction_response() -> dict[str, Any]:
+    return {
+        "id": "resp_compaction_contract",
+        "object": "response",
+        "created_at": 1_723_456_793,
+        "status": "completed",
+        "output": [
+            {
+                "id": "cmp_contract_open",
+                "type": "compaction",
+                "encrypted_content": "Y29tcGFjdC1vcGVu",
+            },
+            {
+                "id": "msg_compaction_contract",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [
+                    {"type": "output_text", "text": "compacted response", "annotations": []}
+                ],
+            },
+            {
+                "id": "cmp_contract_close",
+                "type": "compaction",
+                "encrypted_content": "Y29tcGFjdC1jbG9zZQ==",
+            },
+        ],
+        "usage": {
+            "input_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 4,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 104,
+        },
+    }
+
+
+def strict_custom_tool_sse(
+    tool_input: str = "contract probe", *, include_obfuscation: bool = True
+) -> bytes:
+    added = {
+        "id": "ctc_stream_contract",
+        "type": "custom_tool_call",
+        "status": "in_progress",
+        "call_id": "call_custom_stream_contract",
+        "name": "emit_probe",
+        "input": "",
+    }
+    done = {**added, "status": "completed", "input": tool_input}
+    input_delta: dict[str, Any] = {
+        "type": "response.custom_tool_call_input.delta",
+        "item_id": "ctc_stream_contract",
+        "output_index": 0,
+        "delta": tool_input,
+    }
+    if include_obfuscation:
+        input_delta["obfuscation"] = "never-public"
+    events: list[dict[str, Any]] = [
+        {
+            "type": "response.created",
+            "response": {
+                "id": "resp_custom_stream_contract",
+                "created_at": 1_723_456_794,
+                "status": "in_progress",
+            },
+        },
+        {
+            "type": "response.in_progress",
+            "response": {
+                "id": "resp_custom_stream_contract",
+                "created_at": 1_723_456_794,
+                "status": "in_progress",
+            },
+        },
+        {"type": "response.output_item.added", "output_index": 0, "item": added},
+        input_delta,
+        {
+            "type": "response.custom_tool_call_input.done",
+            "item_id": "ctc_stream_contract",
+            "output_index": 0,
+            "input": tool_input,
+        },
+        {"type": "response.output_item.done", "output_index": 0, "item": done},
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_custom_stream_contract",
+                "object": "response",
+                "created_at": 1_723_456_794,
+                "status": "completed",
+                "output": [],
+                "usage": {
+                    "input_tokens": 2,
+                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 1},
+                    "output_tokens": 3,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 5,
+                },
+            },
+        },
+    ]
+    frames: list[bytes] = []
+    for sequence, event in enumerate(events):
+        event["sequence_number"] = sequence
+        event_type = str(event["type"]).encode("ascii")
+        data = json.dumps(event, separators=(",", ":")).encode("utf-8")
+        frames.append(b"event: " + event_type + b"\ndata: " + data + b"\n\n")
+    return b"".join(frames)
+
+
+def strict_compaction_sse() -> bytes:
+    first = {
+        "id": "cmp_stream_contract_open",
+        "type": "compaction",
+        "encrypted_content": "Y29udHJhY3QtY29tcGFjdC1vcGVu",
+    }
+    message_added = {
+        "id": "msg_stream_compaction_contract",
+        "type": "message",
+        "status": "in_progress",
+        "role": "assistant",
+        "content": [],
+        "phase": "final_answer",
+    }
+    message_done = {
+        **message_added,
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "compacted stream", "annotations": []}],
+    }
+    second = {
+        "id": "cmp_stream_contract_close",
+        "type": "compaction",
+        "encrypted_content": "Y29udHJhY3QtY29tcGFjdC1jbG9zZQ==",
+    }
+    events: list[dict[str, Any]] = [
+        {
+            "type": "response.created",
+            "response": {
+                "id": "resp_stream_compaction_contract",
+                "created_at": 1_723_456_795,
+                "status": "in_progress",
+            },
+        },
+        {
+            "type": "response.in_progress",
+            "response": {
+                "id": "resp_stream_compaction_contract",
+                "created_at": 1_723_456_795,
+                "status": "in_progress",
+            },
+        },
+        {"type": "response.output_item.added", "output_index": 0, "item": first},
+        {"type": "response.output_item.done", "output_index": 0, "item": dict(first)},
+        {"type": "response.output_item.added", "output_index": 1, "item": message_added},
+        {
+            "type": "response.content_part.added",
+            "item_id": "msg_stream_compaction_contract",
+            "output_index": 1,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        },
+        {
+            "type": "response.output_text.delta",
+            "item_id": "msg_stream_compaction_contract",
+            "output_index": 1,
+            "content_index": 0,
+            "delta": "compacted stream",
+        },
+        {
+            "type": "response.output_text.done",
+            "item_id": "msg_stream_compaction_contract",
+            "output_index": 1,
+            "content_index": 0,
+            "text": "compacted stream",
+        },
+        {
+            "type": "response.content_part.done",
+            "item_id": "msg_stream_compaction_contract",
+            "output_index": 1,
+            "content_index": 0,
+            "part": {
+                "type": "output_text",
+                "text": "compacted stream",
+                "annotations": [],
+            },
+        },
+        {"type": "response.output_item.done", "output_index": 1, "item": message_done},
+        {"type": "response.output_item.added", "output_index": 2, "item": second},
+        {"type": "response.output_item.done", "output_index": 2, "item": dict(second)},
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_stream_compaction_contract",
+                "object": "response",
+                "created_at": 1_723_456_795,
+                "status": "completed",
+                "output": [],
+                "usage": {
+                    "input_tokens": 10,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens": 2,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 12,
+                },
+            },
+        },
+    ]
+    frames: list[bytes] = []
+    for sequence, event in enumerate(events):
+        event["sequence_number"] = sequence
+        event_type = str(event["type"]).encode("ascii")
+        data = json.dumps(event, separators=(",", ":")).encode("utf-8")
+        frames.append(b"event: " + event_type + b"\ndata: " + data + b"\n\n")
+    return b"".join(frames)
+
+
+def strict_text_sse(text: str = "streamed text", *, cache_write_tokens: int | None = None) -> bytes:
+    input_token_details = {"cached_tokens": 0}
+    if cache_write_tokens is not None:
+        input_token_details["cache_write_tokens"] = cache_write_tokens
     added = {
         "id": "msg_stream_contract",
         "type": "message",
@@ -268,7 +522,7 @@ def strict_text_sse(text: str = "streamed text") -> bytes:
                 "output": [done],
                 "usage": {
                     "input_tokens": 2,
-                    "input_tokens_details": {"cached_tokens": 0},
+                    "input_tokens_details": input_token_details,
                     "output_tokens": 3,
                     "output_tokens_details": {"reasoning_tokens": 0},
                     "total_tokens": 5,
@@ -276,6 +530,47 @@ def strict_text_sse(text: str = "streamed text") -> bytes:
             },
         },
     ]
+    frames: list[bytes] = []
+    for sequence, event in enumerate(events):
+        event["sequence_number"] = sequence
+        event_type = str(event["type"]).encode("ascii")
+        data = json.dumps(event, separators=(",", ":")).encode("utf-8")
+        frames.append(b"event: " + event_type + b"\ndata: " + data + b"\n\n")
+    frames.append(b"data: [DONE]\n\n")
+    return b"".join(frames)
+
+
+def strict_reasoning_sse(summary_text: str = "bounded reasoning summary") -> bytes:
+    events: list[dict[str, Any]] = []
+    for raw_frame in strict_text_sse("reasoned response").split(b"\n\n"):
+        if not raw_frame or raw_frame == b"data: [DONE]":
+            continue
+        data_line = next(line for line in raw_frame.splitlines() if line.startswith(b"data: "))
+        event = json.loads(data_line.removeprefix(b"data: "))
+        if "output_index" in event:
+            event["output_index"] += 1
+        events.append(event)
+
+    added = {
+        "id": "rs_stream_contract",
+        "type": "reasoning",
+        "status": "in_progress",
+        "summary": [{"type": "summary_text", "text": summary_text}],
+    }
+    done = {
+        **added,
+        "status": "completed",
+        "encrypted_content": "Ym91bmRlZC1yZWFzb25pbmc=",
+    }
+    completed = events[-1]
+    completed_response = completed["response"]
+    assert isinstance(completed_response, dict)
+    completed_response["output"] = [done, *completed_response["output"]]
+    events[1:1] = [
+        {"type": "response.output_item.added", "output_index": 0, "item": added},
+        {"type": "response.output_item.done", "output_index": 0, "item": done},
+    ]
+
     frames: list[bytes] = []
     for sequence, event in enumerate(events):
         event["sequence_number"] = sequence

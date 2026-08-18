@@ -23,10 +23,52 @@ from codex_openai_bridge.wire import (
 )
 
 _PUBLIC_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
+_REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
+_REASONING_SUMMARIES = frozenset({"auto", "concise", "detailed"})
+# Covers the proven 1,024-token trigger and current large context windows while
+# keeping this client-controlled routing threshold finite without new configuration.
+_MAX_COMPACT_THRESHOLD = 1_000_000
 
 
 class ResponsesRequestError(ValueError):
     """Raised when a public Responses request is unsupported or malformed."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningConfig:
+    """One explicitly validated upstream reasoning configuration."""
+
+    effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
+    summary: Literal["auto", "concise", "detailed"] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResponsesStreamOptions:
+    """The one confirmed public Responses streaming option."""
+
+    include_obfuscation: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionContextManagement:
+    """The one confirmed native compaction configuration."""
+
+    compact_threshold: int
+
+
+@dataclass(frozen=True, slots=True)
+class CustomTool:
+    """The one confirmed free-form client-side tool declaration."""
+
+    name: str
+    description: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class NamedCustomToolChoice:
+    """The required named choice for one confirmed custom tool."""
+
+    name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,12 +77,19 @@ class ResponsesRequest:
 
     input: str | tuple[dict[str, Any], ...]
     instructions: str | None
-    max_output_tokens: int | None
+    reasoning: ReasoningConfig | None
+    prompt_cache_key: str | None
+    service_tier: Literal["default"] | None
+    context_management: CompactionContextManagement | None
     tools: tuple[FunctionTool, ...]
     tool_choice: Literal["auto", "required", "none"] | NamedFunctionToolChoice | None
+    custom_tool: CustomTool | None
+    custom_tool_choice: Literal["none"] | NamedCustomToolChoice | None
     parallel_tool_calls: bool | None
     response_format: JsonObjectResponseFormat | JsonSchemaResponseFormat | None
+    text_verbosity: Literal["low", "medium", "high"] | None
     stream: bool
+    stream_options: ResponsesStreamOptions | None
     historical_item_ids: frozenset[str]
     historical_call_ids: frozenset[str]
     historical_reasoning_digests: frozenset[bytes]
@@ -169,6 +218,40 @@ def _canonical_reasoning_digest(
     raise _invalid_request()
 
 
+def _parse_reasoning(value: object) -> ReasoningConfig:
+    if type(value) is not dict or not value or not set(value) <= {"effort", "summary"}:
+        raise _invalid_request()
+    effort = value.get("effort")
+    if "effort" in value and (type(effort) is not str or effort not in _REASONING_EFFORTS):
+        raise _invalid_request()
+    summary = value.get("summary")
+    if "summary" in value and (type(summary) is not str or summary not in _REASONING_SUMMARIES):
+        raise _invalid_request()
+    return ReasoningConfig(
+        effort=cast(
+            Literal["none", "low", "medium", "high", "xhigh", "max"] | None,
+            effort,
+        ),
+        summary=cast(Literal["auto", "concise", "detailed"] | None, summary),
+    )
+
+
+def _parse_context_management(value: object) -> CompactionContextManagement:
+    if type(value) is not list or len(value) != 1:
+        raise _invalid_request()
+    entry = value[0]
+    if type(entry) is not dict or set(entry) != {"type", "compact_threshold"}:
+        raise _invalid_request()
+    threshold = entry["compact_threshold"]
+    if (
+        entry["type"] != "compaction"
+        or type(threshold) is not int
+        or not 1 <= threshold <= _MAX_COMPACT_THRESHOLD
+    ):
+        raise _invalid_request()
+    return CompactionContextManagement(compact_threshold=threshold)
+
+
 def _parse_options(
     document: dict[str, Any],
     *,
@@ -178,40 +261,70 @@ def _parse_options(
     max_json_nodes: int,
     max_string_bytes: int,
 ) -> tuple[
-    int | None,
     tuple[FunctionTool, ...],
     Literal["auto", "required", "none"] | NamedFunctionToolChoice | None,
+    CustomTool | None,
+    Literal["none"] | NamedCustomToolChoice | None,
     bool | None,
     JsonObjectResponseFormat | JsonSchemaResponseFormat | None,
+    Literal["low", "medium", "high"] | None,
 ]:
     synthetic: dict[str, Any] = {
         "model": public_model,
         "messages": [{"role": "user", "content": ""}],
     }
-    if "max_output_tokens" in document:
-        synthetic["max_completion_tokens"] = document["max_output_tokens"]
+    custom_tool: CustomTool | None = None
+    custom_tool_choice: Literal["none"] | NamedCustomToolChoice | None = None
     if "parallel_tool_calls" in document:
         synthetic["parallel_tool_calls"] = document["parallel_tool_calls"]
     if "tools" in document:
         raw_tools = document["tools"]
         if type(raw_tools) is not list:
             raise _invalid_request()
-        translated_tools: list[dict[str, Any]] = []
-        for tool in raw_tools:
+        if any(type(tool) is dict and tool.get("type") == "custom" for tool in raw_tools):
+            if len(raw_tools) != 1:
+                raise _invalid_request()
+            tool = raw_tools[0]
             if (
                 type(tool) is not dict
-                or not {"type", "name", "parameters"} <= set(tool)
-                or not set(tool) <= {"type", "name", "description", "parameters", "strict"}
-                or type(tool.get("type")) is not str
-                or tool["type"] != "function"
+                or not {"type", "name"} <= set(tool)
+                or not set(tool) <= {"type", "name", "description"}
             ):
                 raise _invalid_request()
-            function = {key: deepcopy(value) for key, value in tool.items() if key != "type"}
-            translated_tools.append({"type": "function", "function": function})
-        synthetic["tools"] = translated_tools
+            name = _identifier(tool["name"])
+            description = tool.get("description")
+            if "description" in tool and type(description) is not str:
+                raise _invalid_request()
+            custom_tool = CustomTool(name=name, description=cast(str | None, description))
+        else:
+            translated_tools: list[dict[str, Any]] = []
+            for tool in raw_tools:
+                if (
+                    type(tool) is not dict
+                    or not {"type", "name", "parameters"} <= set(tool)
+                    or not set(tool) <= {"type", "name", "description", "parameters", "strict"}
+                    or type(tool.get("type")) is not str
+                    or tool["type"] != "function"
+                ):
+                    raise _invalid_request()
+                function = {key: deepcopy(value) for key, value in tool.items() if key != "type"}
+                translated_tools.append({"type": "function", "function": function})
+            synthetic["tools"] = translated_tools
     if "tool_choice" in document:
         choice = document["tool_choice"]
-        if type(choice) is dict:
+        if custom_tool is not None:
+            if choice == "none":
+                custom_tool_choice = "none"
+            elif (
+                type(choice) is not dict
+                or set(choice) != {"type", "name"}
+                or choice["type"] != "custom"
+                or choice["name"] != custom_tool.name
+            ):
+                raise _invalid_request()
+            else:
+                custom_tool_choice = NamedCustomToolChoice(name=custom_tool.name)
+        elif type(choice) is dict:
             if set(choice) != {"type", "name"}:
                 raise _invalid_request()
             synthetic["tool_choice"] = {
@@ -220,26 +333,41 @@ def _parse_options(
             }
         else:
             synthetic["tool_choice"] = choice
+    if custom_tool is not None and (
+        custom_tool_choice is None or document.get("parallel_tool_calls") is not False
+    ):
+        raise _invalid_request()
+    if custom_tool is not None:
+        synthetic.pop("parallel_tool_calls", None)
+    text_verbosity: Literal["low", "medium", "high"] | None = None
     if "text" in document:
         text = document["text"]
-        if type(text) is not dict or set(text) != {"format"}:
+        if type(text) is not dict or not text or not set(text) <= {"format", "verbosity"}:
             raise _invalid_request()
-        response_format = text["format"]
-        if type(response_format) is not dict or type(response_format.get("type")) is not str:
-            raise _invalid_request()
-        if response_format["type"] == "json_object":
-            synthetic["response_format"] = deepcopy(response_format)
-        elif response_format["type"] == "json_schema":
-            if set(response_format) - {"type", "name", "description", "schema", "strict"}:
+        if "format" in text:
+            response_format = text["format"]
+            if type(response_format) is not dict or type(response_format.get("type")) is not str:
                 raise _invalid_request()
-            synthetic["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    key: deepcopy(value) for key, value in response_format.items() if key != "type"
-                },
-            }
-        else:
-            raise _invalid_request()
+            if response_format["type"] == "json_object":
+                synthetic["response_format"] = deepcopy(response_format)
+            elif response_format["type"] == "json_schema":
+                if set(response_format) - {"type", "name", "description", "schema", "strict"}:
+                    raise _invalid_request()
+                synthetic["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        key: deepcopy(value)
+                        for key, value in response_format.items()
+                        if key != "type"
+                    },
+                }
+            else:
+                raise _invalid_request()
+        if "verbosity" in text:
+            raw_verbosity = text["verbosity"]
+            if type(raw_verbosity) is not str or raw_verbosity not in {"low", "medium", "high"}:
+                raise _invalid_request()
+            text_verbosity = cast(Literal["low", "medium", "high"], raw_verbosity)
     try:
         parsed = parse_chat_completion_request(
             synthetic,
@@ -254,17 +382,21 @@ def _parse_options(
     except ChatRequestError:
         raise _invalid_request() from None
     return (
-        parsed.max_output_tokens,
         parsed.tools,
         parsed.tool_choice,
-        parsed.parallel_tool_calls,
+        custom_tool,
+        custom_tool_choice,
+        False if custom_tool is not None else parsed.parallel_tool_calls,
         parsed.response_format,
+        text_verbosity,
     )
 
 
 def _parse_input(
     value: object,
     *,
+    allow_compaction: bool,
+    custom_tool: CustomTool | None,
     max_items: int,
     max_tools: int,
     max_json_depth: int,
@@ -286,7 +418,8 @@ def _parse_input(
     pending_call_ids: set[str] = set()
     completed_call_ids: set[str] = set()
     reasoning_digests: set[bytes] = set()
-    reasoning_count = 0
+    encrypted_item_count = 0
+    compaction_count = 0
     tool_call_count = 0
     output_phase = False
     visible_assistant_output = False
@@ -312,23 +445,78 @@ def _parse_input(
             ):
                 raise _invalid_request()
             item_id = _identifier(item["id"])
-            if item_id in item_ids or item["status"] != "completed" or item["summary"] != []:
+            summary = item["summary"]
+            if (
+                item_id in item_ids
+                or item["status"] != "completed"
+                or type(summary) is not list
+                or any(
+                    type(part) is not dict
+                    or set(part) != {"type", "text"}
+                    or part["type"] != "summary_text"
+                    or type(part["text"]) is not str
+                    for part in summary
+                )
+            ):
                 raise _invalid_request()
             digest = _canonical_reasoning_digest(
                 item["encrypted_content"], max_string_bytes=max_string_bytes
             )
             if digest in reasoning_digests:
                 raise _invalid_request()
-            reasoning_count += 1
-            if reasoning_count > max_items:
+            encrypted_item_count += 1
+            if encrypted_item_count > max_items:
                 raise _invalid_request()
             item_ids.add(item_id)
             reasoning_digests.add(digest)
             translated.append({"type": "reasoning", "encrypted_content": item["encrypted_content"]})
             continue
+        if item_type == "compaction":
+            if (
+                not allow_compaction
+                or output_phase
+                or pending_call_ids
+                or (
+                    translated
+                    and not (
+                        compaction_count >= 1
+                        and translated[-1].get("role") == "assistant"
+                        and translated[-1].get("status") == "completed"
+                        and translated[-1].get("phase") == "final_answer"
+                    )
+                )
+                or not {"type", "encrypted_content"} <= set(item)
+                or not set(item) <= {"id", "type", "encrypted_content"}
+            ):
+                raise _invalid_request()
+            checkpoint_id: str | None = None
+            if "id" in item and item["id"] is not None:
+                checkpoint_id = _identifier(item["id"])
+                if checkpoint_id in item_ids:
+                    raise _invalid_request()
+            digest = _canonical_reasoning_digest(
+                item["encrypted_content"], max_string_bytes=max_string_bytes
+            )
+            if digest in reasoning_digests:
+                raise _invalid_request()
+            encrypted_item_count += 1
+            if encrypted_item_count > max_items:
+                raise _invalid_request()
+            compaction_count += 1
+            reasoning_digests.add(digest)
+            translated_compaction: dict[str, Any] = {
+                "type": "compaction",
+                "encrypted_content": item["encrypted_content"],
+            }
+            if checkpoint_id is not None:
+                item_ids.add(checkpoint_id)
+                translated_compaction["id"] = checkpoint_id
+            translated.append(translated_compaction)
+            continue
         if item_type == "function_call":
             if (
-                output_phase
+                custom_tool is not None
+                or output_phase
                 or not {"type", "call_id", "name", "arguments"} <= set(item)
                 or not set(item) <= {"id", "type", "status", "call_id", "name", "arguments"}
             ):
@@ -365,13 +553,11 @@ def _parse_input(
             )
             continue
         if item_type == "function_call_output":
-            if not {"type", "call_id", "output"} <= set(item) or not set(item) <= {
-                "id",
-                "type",
-                "status",
-                "call_id",
-                "output",
-            }:
+            if (
+                custom_tool is not None
+                or not {"type", "call_id", "output"} <= set(item)
+                or not set(item) <= {"id", "type", "status", "call_id", "output"}
+            ):
                 raise _invalid_request()
             if "status" in item and item["status"] != "completed":
                 raise _invalid_request()
@@ -395,10 +581,93 @@ def _parse_input(
                 {"type": "function_call_output", "call_id": call_id, "output": output}
             )
             continue
+        if item_type == "custom_tool_call":
+            if (
+                custom_tool is None
+                or output_phase
+                or visible_assistant_output
+                or pending_call_ids
+                or not {"type", "call_id", "name", "input"} <= set(item)
+                or not set(item) <= {"id", "type", "call_id", "name", "input"}
+            ):
+                raise _invalid_request()
+            if "id" in item:
+                item_id = _identifier(item["id"])
+                if item_id in item_ids:
+                    raise _invalid_request()
+                item_ids.add(item_id)
+            call_id = _identifier(item["call_id"])
+            name = _identifier(item["name"])
+            tool_input = item["input"]
+            if call_id in call_ids or name != custom_tool.name or type(tool_input) is not str:
+                raise _invalid_request()
+            tool_call_count += 1
+            if tool_call_count > max_tools:
+                raise _invalid_request()
+            call_ids.add(call_id)
+            pending_call_ids.add(call_id)
+            translated.append(
+                {
+                    "type": "custom_tool_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "input": tool_input,
+                }
+            )
+            continue
+        if item_type == "custom_tool_call_output":
+            if (
+                custom_tool is None
+                or not {"type", "call_id", "output"} <= set(item)
+                or not set(item) <= {"id", "type", "call_id", "output"}
+            ):
+                raise _invalid_request()
+            if "id" in item:
+                item_id = _identifier(item["id"])
+                if item_id in item_ids:
+                    raise _invalid_request()
+                item_ids.add(item_id)
+            call_id = _identifier(item["call_id"])
+            output = item["output"]
+            if (
+                type(output) is not str
+                or call_id not in pending_call_ids
+                or call_id in completed_call_ids
+            ):
+                raise _invalid_request()
+            pending_call_ids.remove(call_id)
+            completed_call_ids.add(call_id)
+            output_phase = True
+            translated.append(
+                {"type": "custom_tool_call_output", "call_id": call_id, "output": output}
+            )
+            continue
 
         if pending_call_ids:
             raise _invalid_request()
         role = item.get("role")
+        if role == "developer":
+            if not set(item) <= {"type", "role", "content"} or set(item) < {
+                "role",
+                "content",
+            }:
+                raise _invalid_request()
+            if "type" in item and item["type"] != "message":
+                raise _invalid_request()
+            content = item["content"]
+            if type(content) is not list or not 1 <= len(content) <= max_items:
+                raise _invalid_request()
+            parts: list[dict[str, str]] = []
+            for part in content:
+                if type(part) is not dict or set(part) != {"type", "text"}:
+                    raise _invalid_request()
+                if part["type"] != "input_text" or type(part["text"]) is not str:
+                    raise _invalid_request()
+                parts.append({"type": "input_text", "text": part["text"]})
+            output_phase = False
+            visible_assistant_output = False
+            translated.append({"role": "developer", "content": parts})
+            continue
         if role == "user":
             if not set(item) <= {"type", "role", "content"} or set(item) < {
                 "role",
@@ -425,14 +694,30 @@ def _parse_input(
             translated.append({"role": "user", "content": parts})
             continue
         if role == "assistant":
-            if set(item) != {"id", "type", "status", "role", "content"}:
+            if not {"type", "status", "role", "content"} <= set(item) or not set(item) <= {
+                "id",
+                "type",
+                "status",
+                "role",
+                "content",
+                "phase",
+            }:
                 raise _invalid_request()
-            item_id = _identifier(item["id"])
+            assistant_item_id: str | None = None
+            if "id" in item:
+                assistant_item_id = _identifier(item["id"])
             content = item["content"]
+            status = item["status"]
+            phase = item.get("phase")
             if (
                 item["type"] != "message"
-                or item["status"] != "completed"
-                or item_id in item_ids
+                or type(status) is not str
+                or status not in {"completed", "in_progress", "incomplete"}
+                or (
+                    "phase" in item
+                    and (type(phase) is not str or phase not in {"commentary", "final_answer"})
+                )
+                or (assistant_item_id is not None and assistant_item_id in item_ids)
                 or type(content) is not list
                 or not 1 <= len(content) <= max_items
             ):
@@ -441,17 +726,26 @@ def _parse_input(
             for part in content:
                 if (
                     type(part) is not dict
-                    or set(part) != {"type", "text", "annotations"}
+                    or not {"type", "text"} <= set(part)
+                    or not set(part) <= {"type", "text", "annotations"}
                     or part["type"] != "output_text"
                     or type(part["text"]) is not str
-                    or part["annotations"] != []
+                    or ("annotations" in part and part["annotations"] != [])
                 ):
                     raise _invalid_request()
                 parts.append({"type": "output_text", "text": part["text"]})
-            item_ids.add(item_id)
+            if assistant_item_id is not None:
+                item_ids.add(assistant_item_id)
             output_phase = False
             visible_assistant_output = True
-            translated.append({"role": "assistant", "content": parts})
+            assistant_message: dict[str, Any] = {
+                "role": "assistant",
+                "status": status,
+                "content": parts,
+            }
+            if phase is not None:
+                assistant_message["phase"] = phase
+            translated.append(assistant_message)
             continue
         raise _invalid_request()
     if pending_call_ids:
@@ -499,11 +793,15 @@ def parse_responses_request(
         "tools",
         "tool_choice",
         "parallel_tool_calls",
-        "max_output_tokens",
         "text",
         "store",
         "stream",
         "include",
+        "reasoning",
+        "prompt_cache_key",
+        "stream_options",
+        "service_tier",
+        "context_management",
     }
     if not {"model", "input"} <= set(document) or not set(document) <= allowed:
         raise _invalid_request()
@@ -520,10 +818,53 @@ def parse_responses_request(
     stream = document.get("stream", False)
     if type(stream) is not bool:
         raise _invalid_request()
+    stream_options: ResponsesStreamOptions | None = None
+    if "stream_options" in document:
+        raw_stream_options = document["stream_options"]
+        if (
+            not stream
+            or type(raw_stream_options) is not dict
+            or set(raw_stream_options) != {"include_obfuscation"}
+            or type(raw_stream_options["include_obfuscation"]) is not bool
+        ):
+            raise _invalid_request()
+        stream_options = ResponsesStreamOptions(
+            include_obfuscation=raw_stream_options["include_obfuscation"]
+        )
     if "include" in document and document["include"] != ["reasoning.encrypted_content"]:
         raise _invalid_request()
     instructions = document.get("instructions")
     if "instructions" in document and type(instructions) is not str:
+        raise _invalid_request()
+    reasoning = _parse_reasoning(document["reasoning"]) if "reasoning" in document else None
+    prompt_cache_key = document.get("prompt_cache_key")
+    if "prompt_cache_key" in document and type(prompt_cache_key) is not str:
+        raise _invalid_request()
+    service_tier = document.get("service_tier")
+    if "service_tier" in document and service_tier != "default":
+        raise _invalid_request()
+    context_management = (
+        _parse_context_management(document["context_management"])
+        if "context_management" in document
+        else None
+    )
+    (
+        tools,
+        tool_choice,
+        custom_tool,
+        custom_tool_choice,
+        parallel_tool_calls,
+        response_format,
+        text_verbosity,
+    ) = _parse_options(
+        document,
+        public_model=public_model,
+        max_tools=max_tools,
+        max_json_depth=max_json_depth,
+        max_json_nodes=max_json_nodes,
+        max_string_bytes=max_string_bytes,
+    )
+    if context_management is not None and (tools or custom_tool is not None):
         raise _invalid_request()
     (
         parsed_input,
@@ -532,29 +873,40 @@ def parse_responses_request(
         historical_reasoning_digests,
     ) = _parse_input(
         document["input"],
+        allow_compaction=context_management is not None,
+        custom_tool=custom_tool,
         max_items=max_items,
         max_tools=max_tools,
         max_json_depth=max_json_depth,
         max_json_nodes=max_json_nodes,
         max_string_bytes=max_string_bytes,
     )
-    max_output_tokens, tools, tool_choice, parallel_tool_calls, response_format = _parse_options(
-        document,
-        public_model=public_model,
-        max_tools=max_tools,
-        max_json_depth=max_json_depth,
-        max_json_nodes=max_json_nodes,
-        max_string_bytes=max_string_bytes,
-    )
+    if custom_tool is not None:
+        custom_continuation = (
+            type(parsed_input) is tuple
+            and bool(parsed_input)
+            and parsed_input[-1].get("type") == "custom_tool_call_output"
+        )
+        if (custom_continuation and custom_tool_choice != "none") or (
+            not custom_continuation and not isinstance(custom_tool_choice, NamedCustomToolChoice)
+        ):
+            raise _invalid_request()
     return ResponsesRequest(
         input=parsed_input,
         instructions=instructions,
-        max_output_tokens=max_output_tokens,
+        reasoning=reasoning,
+        prompt_cache_key=prompt_cache_key,
+        service_tier=cast(Literal["default"] | None, service_tier),
+        context_management=context_management,
         tools=tools,
         tool_choice=tool_choice,
+        custom_tool=custom_tool,
+        custom_tool_choice=custom_tool_choice,
         parallel_tool_calls=parallel_tool_calls,
         response_format=response_format,
+        text_verbosity=text_verbosity,
         stream=stream,
+        stream_options=stream_options,
         historical_item_ids=historical_item_ids,
         historical_call_ids=historical_call_ids,
         historical_reasoning_digests=historical_reasoning_digests,
@@ -574,6 +926,13 @@ def _tool_payload(tool: FunctionTool) -> dict[str, Any]:
     return result
 
 
+def _custom_tool_payload(tool: CustomTool) -> dict[str, Any]:
+    result = {"type": "custom", "name": tool.name}
+    if tool.description is not None:
+        result["description"] = tool.description
+    return result
+
+
 def _tool_choice_payload(
     choice: Literal["auto", "required", "none"] | NamedFunctionToolChoice | None,
 ) -> str | dict[str, str] | None:
@@ -584,11 +943,18 @@ def _tool_choice_payload(
 
 def _text_payload(
     response_format: JsonObjectResponseFormat | JsonSchemaResponseFormat | None,
+    verbosity: Literal["low", "medium", "high"] | None,
 ) -> dict[str, Any] | None:
-    if response_format is None:
+    if response_format is None and verbosity is None:
         return None
+    result: dict[str, Any] = {}
+    if verbosity is not None:
+        result["verbosity"] = verbosity
+    if response_format is None:
+        return result
     if isinstance(response_format, JsonObjectResponseFormat):
-        return {"format": {"type": "json_object"}}
+        result["format"] = {"type": "json_object"}
+        return result
     value: dict[str, Any] = {
         "type": "json_schema",
         "name": json_schema_name_for_upstream(response_format.name),
@@ -598,7 +964,8 @@ def _text_payload(
         value["description"] = response_format.description
     if response_format.strict is not None:
         value["strict"] = response_format.strict
-    return {"format": value}
+    result["format"] = value
+    return result
 
 
 def responses_request_to_upstream(
@@ -626,16 +993,46 @@ def responses_request_to_upstream(
     }
     if request.instructions is not None:
         payload["instructions"] = request.instructions
-    # The upstream Codex route rejects max_output_tokens; it remains a validated
-    # public compatibility field and is bounded locally by response bytes/time.
+    if request.reasoning is not None:
+        reasoning: dict[str, str] = {}
+        if request.reasoning.effort is not None:
+            reasoning["effort"] = request.reasoning.effort
+        if request.reasoning.summary is not None:
+            reasoning["summary"] = request.reasoning.summary
+        payload["reasoning"] = reasoning
+    if request.prompt_cache_key is not None:
+        payload["prompt_cache_key"] = request.prompt_cache_key
+    if request.service_tier is not None:
+        payload["service_tier"] = request.service_tier
+    if request.context_management is not None:
+        payload["context_management"] = [
+            {
+                "type": "compaction",
+                "compact_threshold": request.context_management.compact_threshold,
+            }
+        ]
+    if request.stream_options is not None:
+        payload["stream_options"] = {
+            "include_obfuscation": request.stream_options.include_obfuscation
+        }
     if request.tools:
         payload["tools"] = [_tool_payload(tool) for tool in request.tools]
-    choice = _tool_choice_payload(request.tool_choice)
+    if request.custom_tool is not None:
+        payload["tools"] = [_custom_tool_payload(request.custom_tool)]
+    choice: str | dict[str, str] | None
+    if request.custom_tool_choice is not None:
+        choice = (
+            "none"
+            if request.custom_tool_choice == "none"
+            else {"type": "custom", "name": request.custom_tool_choice.name}
+        )
+    else:
+        choice = _tool_choice_payload(request.tool_choice)
     if choice is not None:
         payload["tool_choice"] = choice
     if request.parallel_tool_calls is not None:
         payload["parallel_tool_calls"] = request.parallel_tool_calls
-    text = _text_payload(request.response_format)
+    text = _text_payload(request.response_format, request.text_verbosity)
     if text is not None:
         payload["text"] = text
     return payload
@@ -658,7 +1055,19 @@ def responses_public_snapshot(
     ):
         raise UpstreamResponseError("invalid upstream response")
     tools = [_tool_payload(tool) for tool in request.tools]
-    choice = _tool_choice_payload(request.tool_choice)
+    choice: str | dict[str, str] | None = _tool_choice_payload(request.tool_choice)
+    if request.custom_tool is not None:
+        tools = [_custom_tool_payload(request.custom_tool)]
+        choice = (
+            "none"
+            if request.custom_tool_choice == "none"
+            else {
+                "type": "custom",
+                "name": request.custom_tool_choice.name,
+            }
+            if isinstance(request.custom_tool_choice, NamedCustomToolChoice)
+            else None
+        )
     return {
         "id": response_id,
         "object": "response",
@@ -770,13 +1179,19 @@ def responses_to_public(
         if isinstance(request.tool_choice, NamedFunctionToolChoice)
         else None
     )
+    custom_continuation = (
+        type(request.input) is tuple and request.input[-1].get("type") == "custom_tool_call_output"
+    )
     item_ids: set[str] = {response_id, *request.historical_item_ids}
     call_ids: set[str] = set(request.historical_call_ids)
     reasoning_digests: set[bytes] = set(request.historical_reasoning_digests)
-    reasoning_count = 0
+    encrypted_item_count = 0
+    compaction_count = 0
     function_count = 0
+    custom_count = 0
     message_count = 0
     function_phase = False
+    custom_phase = False
     visible_output = False
     for raw_item in output:
         if type(raw_item) is not dict:
@@ -809,6 +1224,8 @@ def responses_to_public(
                 for part in summary
             ):
                 raise UpstreamResponseError("invalid upstream response")
+            if summary and (request.reasoning is None or request.reasoning.summary is None):
+                raise UpstreamResponseError("invalid upstream response")
             digest = _canonical_reasoning_digest(
                 raw_item["encrypted_content"],
                 max_string_bytes=max_string_bytes,
@@ -816,8 +1233,8 @@ def responses_to_public(
             )
             if raw_item["status"] != "completed" or digest in reasoning_digests:
                 raise UpstreamResponseError("invalid upstream response")
-            reasoning_count += 1
-            if reasoning_count > max_items:
+            encrypted_item_count += 1
+            if encrypted_item_count > max_items:
                 raise UpstreamResponseError("invalid upstream response")
             reasoning_digests.add(digest)
             public_output.append(
@@ -825,18 +1242,58 @@ def responses_to_public(
                     "id": item_id,
                     "type": "reasoning",
                     "status": "completed",
-                    "summary": [],
+                    "summary": [{"type": "summary_text", "text": part["text"]} for part in summary],
+                    "encrypted_content": raw_item["encrypted_content"],
+                }
+            )
+            continue
+        if item_type == "compaction":
+            if (
+                request.context_management is None
+                or function_phase
+                or custom_phase
+                or (
+                    public_output
+                    and not (compaction_count >= 1 and public_output[-1].get("type") == "message")
+                )
+                or set(raw_item) != {"id", "type", "encrypted_content"}
+            ):
+                raise UpstreamResponseError("invalid upstream response")
+            digest = _canonical_reasoning_digest(
+                raw_item["encrypted_content"],
+                max_string_bytes=max_string_bytes,
+                upstream=True,
+            )
+            if digest in reasoning_digests:
+                raise UpstreamResponseError("invalid upstream response")
+            encrypted_item_count += 1
+            if encrypted_item_count > max_items:
+                raise UpstreamResponseError("invalid upstream response")
+            compaction_count += 1
+            reasoning_digests.add(digest)
+            public_output.append(
+                {
+                    "id": item_id,
+                    "type": "compaction",
                     "encrypted_content": raw_item["encrypted_content"],
                 }
             )
             continue
         if item_type == "message":
-            if function_phase or set(raw_item) != {"id", "type", "status", "role", "content"}:
+            required_message = {"id", "type", "status", "role", "content"}
+            if (
+                function_phase
+                or custom_phase
+                or not required_message <= set(raw_item)
+                or not set(raw_item) <= required_message | {"phase"}
+            ):
                 raise UpstreamResponseError("invalid upstream response")
             content = raw_item["content"]
             if (
                 raw_item["status"] != "completed"
                 or raw_item["role"] != "assistant"
+                or ("phase" in raw_item and raw_item["phase"] not in {"commentary", "final_answer"})
+                or (compaction_count == 1 and raw_item.get("phase") != "final_answer")
                 or type(content) is not list
                 or not 1 <= len(content) <= max_items
             ):
@@ -855,19 +1312,24 @@ def responses_to_public(
                 ):
                     raise UpstreamResponseError("invalid upstream response")
                 parts.append({"type": "output_text", "text": part["text"], "annotations": []})
-            public_output.append(
-                {
-                    "id": item_id,
-                    "type": "message",
-                    "status": "completed",
-                    "role": "assistant",
-                    "content": parts,
-                }
-            )
+            public_message: dict[str, Any] = {
+                "id": item_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": parts,
+            }
+            if "phase" in raw_item:
+                public_message["phase"] = raw_item["phase"]
+            public_output.append(public_message)
             visible_output = True
             continue
         if item_type == "function_call":
-            if set(raw_item) != {"id", "type", "status", "call_id", "name", "arguments"}:
+            if (
+                request.custom_tool is not None
+                or custom_phase
+                or set(raw_item) != {"id", "type", "status", "call_id", "name", "arguments"}
+            ):
                 raise UpstreamResponseError("invalid upstream response")
             call_id = _identifier(raw_item["call_id"], upstream=True)
             name = _identifier(raw_item["name"], upstream=True)
@@ -905,8 +1367,58 @@ def responses_to_public(
                 }
             )
             continue
+        if item_type == "custom_tool_call":
+            if (
+                request.custom_tool is None
+                or function_phase
+                or custom_phase
+                or set(raw_item) != {"id", "type", "status", "call_id", "name", "input"}
+            ):
+                raise UpstreamResponseError("invalid upstream response")
+            call_id = _identifier(raw_item["call_id"], upstream=True)
+            name = _identifier(raw_item["name"], upstream=True)
+            tool_input = raw_item["input"]
+            if (
+                raw_item["status"] != "completed"
+                or call_id in call_ids
+                or name != request.custom_tool.name
+                or not isinstance(request.custom_tool_choice, NamedCustomToolChoice)
+                or name != request.custom_tool_choice.name
+                or type(tool_input) is not str
+            ):
+                raise UpstreamResponseError("invalid upstream response")
+            custom_count += 1
+            if custom_count > 1:
+                raise UpstreamResponseError("invalid upstream response")
+            custom_phase = True
+            visible_output = True
+            call_ids.add(call_id)
+            public_output.append(
+                {
+                    "id": item_id,
+                    "type": "custom_tool_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "input": tool_input,
+                }
+            )
+            continue
         raise UpstreamResponseError("invalid upstream response")
-    if message_count == 0 and function_count == 0:
+    if message_count == 0 and function_count == 0 and custom_count == 0 and compaction_count == 0:
+        raise UpstreamResponseError("invalid upstream response")
+    if compaction_count and (
+        compaction_count != 2
+        or message_count != 1
+        or function_count != 0
+        or [item.get("type") for item in public_output] != ["compaction", "message", "compaction"]
+    ):
+        raise UpstreamResponseError("invalid upstream response")
+    if request.custom_tool is not None and (
+        function_count != 0
+        or compaction_count != 0
+        or (custom_count == 1 and message_count != 0)
+        or (custom_count == 0 and (not custom_continuation or message_count != 1))
+    ):
         raise UpstreamResponseError("invalid upstream response")
     if (
         request.tool_choice == "required" or required_tool_name is not None
@@ -928,15 +1440,34 @@ def responses_to_public(
         if type(candidate) is not int or candidate < 0:
             raise UpstreamResponseError("invalid upstream response")
         exact_usage[field] = candidate
+    raw_input_token_details = usage["input_tokens_details"]
     cached_tokens = _usage_detail(
-        usage["input_tokens_details"],
+        raw_input_token_details,
         "cached_tokens",
         optional_fields=frozenset({"cache_write_tokens"}),
     )
+    assert type(raw_input_token_details) is dict
+    public_input_token_details = {"cached_tokens": cached_tokens}
+    if "cache_write_tokens" in raw_input_token_details:
+        public_input_token_details["cache_write_tokens"] = raw_input_token_details[
+            "cache_write_tokens"
+        ]
     reasoning_tokens = _usage_detail(usage["output_tokens_details"], "reasoning_tokens")
 
-    tools = [_tool_payload(tool) for tool in request.tools]
-    choice = _tool_choice_payload(request.tool_choice)
+    if request.custom_tool is not None:
+        tools = [_custom_tool_payload(request.custom_tool)]
+        assert request.custom_tool_choice is not None
+        choice: str | dict[str, str] | None = (
+            "none"
+            if request.custom_tool_choice == "none"
+            else {
+                "type": "custom",
+                "name": request.custom_tool_choice.name,
+            }
+        )
+    else:
+        tools = [_tool_payload(tool) for tool in request.tools]
+        choice = _tool_choice_payload(request.tool_choice)
     return {
         "id": response_id,
         "object": "response",
@@ -953,7 +1484,7 @@ def responses_to_public(
         "tools": tools,
         "usage": {
             "input_tokens": exact_usage["input_tokens"],
-            "input_tokens_details": {"cached_tokens": cached_tokens},
+            "input_tokens_details": public_input_token_details,
             "output_tokens": exact_usage["output_tokens"],
             "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
             "total_tokens": exact_usage["total_tokens"],

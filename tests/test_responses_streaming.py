@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from collections.abc import AsyncIterator
@@ -16,6 +17,9 @@ from openai import AsyncOpenAI
 from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseCustomToolCall,
+    ResponseCustomToolCallInputDeltaEvent,
+    ResponseCustomToolCallInputDoneEvent,
     ResponseErrorEvent,
     ResponseOutputItemDoneEvent,
     ResponseTextDeltaEvent,
@@ -230,6 +234,142 @@ def _text_events() -> list[dict[str, Any]]:
     return events
 
 
+def _compaction_events() -> list[dict[str, Any]]:
+    first_compaction = {
+        "id": "cmp_stream_1",
+        "type": "compaction",
+        "encrypted_content": "Y29tcGFjdC0x",
+    }
+    message_added = {
+        "id": "msg_compaction_stream",
+        "type": "message",
+        "status": "in_progress",
+        "role": "assistant",
+        "content": [],
+        "phase": "final_answer",
+    }
+    message_done = {
+        **message_added,
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+    }
+    second_compaction = {
+        "id": "cmp_stream_2",
+        "type": "compaction",
+        "encrypted_content": "Y29tcGFjdC0y",
+    }
+    events: list[dict[str, Any]] = [
+        {
+            "type": "response.created",
+            "response": {
+                "id": "resp_compaction_stream",
+                "created_at": 11,
+                "status": "in_progress",
+                "model": "SENSITIVE_UPSTREAM_MODEL",
+                "internal_account": "SENSITIVE_INTERNAL_ACCOUNT",
+            },
+        },
+        {
+            "type": "response.in_progress",
+            "response": {
+                "id": "resp_compaction_stream",
+                "created_at": 11,
+                "status": "in_progress",
+                "model": "SENSITIVE_SECOND_UPSTREAM_MODEL",
+            },
+        },
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": first_compaction,
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": dict(first_compaction),
+        },
+        {
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": message_added,
+        },
+        {
+            "type": "response.content_part.added",
+            "item_id": "msg_compaction_stream",
+            "output_index": 1,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        },
+        {
+            "type": "response.output_text.delta",
+            "item_id": "msg_compaction_stream",
+            "output_index": 1,
+            "content_index": 0,
+            "delta": "hello",
+        },
+        {
+            "type": "response.output_text.done",
+            "item_id": "msg_compaction_stream",
+            "output_index": 1,
+            "content_index": 0,
+            "text": "hello",
+        },
+        {
+            "type": "response.content_part.done",
+            "item_id": "msg_compaction_stream",
+            "output_index": 1,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "hello", "annotations": []},
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "item": message_done,
+        },
+        {
+            "type": "response.output_item.added",
+            "output_index": 2,
+            "item": second_compaction,
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 2,
+            "item": dict(second_compaction),
+        },
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_compaction_stream",
+                "object": "response",
+                "created_at": 11,
+                "status": "completed",
+                "model": "SENSITIVE_TERMINAL_UPSTREAM_MODEL",
+                "output": [],
+                "usage": {
+                    "input_tokens": 1,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens": 2,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 3,
+                },
+                "internal_account": "SENSITIVE_TERMINAL_ACCOUNT",
+            },
+        },
+    ]
+    for sequence, event in enumerate(events):
+        event["sequence_number"] = sequence
+    return events
+
+
+def _compaction_document(*, stream: bool) -> dict[str, object]:
+    return {
+        "model": "codex",
+        "input": "hello",
+        "stream": stream,
+        "context_management": [{"type": "compaction", "compact_threshold": 1024}],
+    }
+
+
 async def _translate(
     events: list[dict[str, Any]],
     *,
@@ -311,6 +451,75 @@ async def test_direct_stream_completed_eof_generates_sdk_done_marker() -> None:
 
 
 @pytest.mark.asyncio
+async def test_direct_stream_projects_native_compaction_lifecycle_in_live_order() -> None:
+    frames = await _translate(
+        _compaction_events(),
+        document=_compaction_document(stream=True),
+        upstream_done=False,
+    )
+
+    assert frames[-1] == b"data: [DONE]\n\n"
+    decoded = [_decode(frame) for frame in frames[:-1]]
+    assert [name for name, _ in decoded] == [event["type"] for event in _compaction_events()]
+    streamed_items = [
+        data["item"]
+        for name, data in decoded
+        if name in {"response.output_item.added", "response.output_item.done"}
+    ]
+    assert [item["type"] for item in streamed_items] == [
+        "compaction",
+        "compaction",
+        "message",
+        "message",
+        "compaction",
+        "compaction",
+    ]
+    assert (
+        streamed_items[0]
+        == streamed_items[1]
+        == {
+            "id": "cmp_stream_1",
+            "type": "compaction",
+            "encrypted_content": "Y29tcGFjdC0x",
+        }
+    )
+    assert (
+        streamed_items[4]
+        == streamed_items[5]
+        == {
+            "id": "cmp_stream_2",
+            "type": "compaction",
+            "encrypted_content": "Y29tcGFjdC0y",
+        }
+    )
+    completed = decoded[-1][1]["response"]
+    assert completed["model"] == "codex"
+    assert [item["type"] for item in completed["output"]] == [
+        "compaction",
+        "message",
+        "compaction",
+    ]
+    assert completed["output"] == [streamed_items[1], streamed_items[3], streamed_items[5]]
+    assert "SENSITIVE" not in repr(decoded)
+
+    replayed_events = _compaction_events()
+    terminal = replayed_events[-1]["response"]
+    assert isinstance(terminal, dict)
+    terminal["output"] = [
+        dict(replayed_events[3]["item"]),
+        dict(replayed_events[9]["item"]),
+        dict(replayed_events[11]["item"]),
+    ]
+    replayed_frames = await _translate(
+        replayed_events,
+        document=_compaction_document(stream=True),
+        upstream_done=False,
+    )
+    _, replayed_completed = _decode(replayed_frames[-2])
+    assert replayed_completed["response"]["output"] == completed["output"]
+
+
+@pytest.mark.asyncio
 async def test_nonstream_transport_uses_one_stream_request_and_collects_completed_response(
     tmp_path: Path,
 ) -> None:
@@ -346,6 +555,168 @@ async def test_nonstream_transport_uses_one_stream_request_and_collects_complete
     assert transport.stream.close_calls == 1
 
 
+@pytest.mark.asyncio
+async def test_buffered_nonstream_reconstructs_native_compaction_done_items(
+    tmp_path: Path,
+) -> None:
+    wire = b"".join(_event(event) for event in _compaction_events())
+    transport = _StreamingOnlyUpstream(wire)
+    adapter = upstream_module.BufferedResponsesUpstream(transport, _settings(tmp_path))
+    credential = _CredentialManager().credential
+    request = _parse(_compaction_document(stream=False))
+    payload = responses_request_to_upstream(request, upstream_model="server-model")
+
+    response = await adapter.create_response(credential, payload)
+
+    assert isinstance(response, dict)
+    assert [item["type"] for item in response["output"]] == [
+        "compaction",
+        "message",
+        "compaction",
+    ]
+    assert response["output"][0] == {
+        "id": "cmp_stream_1",
+        "type": "compaction",
+        "encrypted_content": "Y29tcGFjdC0x",
+    }
+    assert response["output"][2] == {
+        "id": "cmp_stream_2",
+        "type": "compaction",
+        "encrypted_content": "Y29tcGFjdC0y",
+    }
+    assert transport.nonstream_calls == 0
+    assert transport.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_case",
+    [
+        "without_context_management",
+        "missing_in_progress_setup",
+        "missing_final_answer_phase",
+        "consecutive_compactions",
+        "duplicate_item_id",
+        "duplicate_encrypted_digest",
+        "historical_item_id",
+        "historical_reasoning_digest",
+        "extra_plaintext_field",
+        "malformed_encrypted_content",
+        "oversized_item_id",
+        "oversized_encrypted_content",
+        "wrong_output_index",
+        "done_before_added",
+        "missing_done",
+        "missing_closing_checkpoint",
+        "compaction_only",
+        "added_done_mismatch",
+        "terminal_output_conflict",
+    ],
+)
+async def test_direct_compaction_stream_fails_closed_outside_live_authority(
+    invalid_case: str,
+) -> None:
+    events = _compaction_events()
+    document = _compaction_document(stream=True)
+    if invalid_case == "without_context_management":
+        document.pop("context_management")
+    elif invalid_case == "missing_in_progress_setup":
+        events.pop(1)
+    elif invalid_case == "missing_final_answer_phase":
+        for index in (4, 9):
+            item = events[index]["item"]
+            assert isinstance(item, dict)
+            item.pop("phase")
+    elif invalid_case == "consecutive_compactions":
+        second_added = events.pop(10)
+        second_done = events.pop(10)
+        for event in events[4:10]:
+            if "output_index" in event:
+                event["output_index"] = 2
+        second_added["output_index"] = 1
+        second_done["output_index"] = 1
+        events[4:4] = [second_added, second_done]
+    elif invalid_case in {"duplicate_item_id", "duplicate_encrypted_digest"}:
+        first = events[2]["item"]
+        second_added = events[10]["item"]
+        second_done = events[11]["item"]
+        assert isinstance(first, dict)
+        assert isinstance(second_added, dict)
+        assert isinstance(second_done, dict)
+        field = "id" if invalid_case == "duplicate_item_id" else "encrypted_content"
+        second_added[field] = first[field]
+        second_done[field] = first[field]
+    elif invalid_case in {"historical_item_id", "historical_reasoning_digest"}:
+        historical_id = "cmp_stream_1" if invalid_case == "historical_item_id" else "rs_history"
+        historical_content = (
+            "aGlzdG9yaWNhbA==" if invalid_case == "historical_item_id" else "Y29tcGFjdC0x"
+        )
+        document["input"] = [
+            {
+                "id": historical_id,
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [],
+                "encrypted_content": historical_content,
+            },
+            {
+                "id": "msg_history",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "earlier", "annotations": []}],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ]
+    elif invalid_case in {"extra_plaintext_field", "malformed_encrypted_content"}:
+        for index in (2, 3):
+            item = events[index]["item"]
+            assert isinstance(item, dict)
+            if invalid_case == "extra_plaintext_field":
+                item["summary"] = "SENSITIVE PLAINTEXT"
+            else:
+                item["encrypted_content"] = "not base64!"
+    elif invalid_case in {"oversized_item_id", "oversized_encrypted_content"}:
+        field = "id" if invalid_case == "oversized_item_id" else "encrypted_content"
+        value = "x" * (129 if invalid_case == "oversized_item_id" else 4097)
+        for index in (2, 3):
+            item = events[index]["item"]
+            assert isinstance(item, dict)
+            item[field] = value
+    elif invalid_case == "wrong_output_index":
+        events[10]["output_index"] = 3
+        events[11]["output_index"] = 3
+    elif invalid_case == "done_before_added":
+        events[2], events[3] = events[3], events[2]
+    elif invalid_case == "missing_done":
+        events.pop(3)
+    elif invalid_case == "missing_closing_checkpoint":
+        events = [*events[:10], events[-1]]
+    elif invalid_case == "compaction_only":
+        events = [*events[:4], events[-1]]
+    elif invalid_case == "added_done_mismatch":
+        item = events[3]["item"]
+        assert isinstance(item, dict)
+        item["encrypted_content"] = "bWlzbWF0Y2g="
+    else:
+        response = events[-1]["response"]
+        assert isinstance(response, dict)
+        conflicting = [
+            dict(events[3]["item"]),
+            dict(events[9]["item"]),
+            dict(events[11]["item"]),
+        ]
+        conflicting[2]["encrypted_content"] = "Y29uZmxpY3Q="
+        response["output"] = conflicting
+    for sequence, event in enumerate(events):
+        event["sequence_number"] = sequence
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$") as caught:
+        await _translate(events, document=document, upstream_done=False)
+
+    assert "SENSITIVE" not in str(caught.value)
+
+
 @pytest.mark.parametrize("invalid_metadata", ["nonempty_logprobs", "negative_cache_write_tokens"])
 @pytest.mark.asyncio
 async def test_buffered_nonstream_rejects_malformed_live_metadata(
@@ -378,7 +749,7 @@ async def test_buffered_nonstream_rejects_malformed_live_metadata(
 
 
 @pytest.mark.asyncio
-async def test_direct_live_codex_metadata_is_stripped_and_done_items_restore_output() -> None:
+async def test_direct_live_codex_metadata_preserves_phase_and_confirmed_usage() -> None:
     events = _text_events()
     for event in events:
         if event["type"] in {"response.output_item.added", "response.output_item.done"}:
@@ -406,12 +777,16 @@ async def test_direct_live_codex_metadata_is_stripped_and_done_items_restore_out
     frames = await _translate(events, upstream_done=False)
 
     serialized = b"".join(frames)
-    assert b"phase" not in serialized
+    assert b'"phase":"final_answer"' in serialized
     assert b"obfuscation" not in serialized
     assert b"bounded-padding" not in serialized
-    assert b"cache_write_tokens" not in serialized
     _, completed = _decode(frames[-2])
     assert completed["response"]["output"][0]["content"][0]["text"] == "hello"
+    assert completed["response"]["output"][0]["phase"] == "final_answer"
+    assert completed["response"]["usage"]["input_tokens_details"] == {
+        "cached_tokens": 0,
+        "cache_write_tokens": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -617,6 +992,517 @@ def _tool_document() -> dict[str, object]:
     }
 
 
+def _custom_tool_document(*, input_value: object = "hello") -> dict[str, object]:
+    return {
+        "model": "codex",
+        "input": input_value,
+        "stream": True,
+        "tools": [{"type": "custom", "name": "emit_probe"}],
+        "tool_choice": {"type": "custom", "name": "emit_probe"},
+        "parallel_tool_calls": False,
+    }
+
+
+def _custom_tool_events(
+    *,
+    item_id: str | None = "ctc_stream",
+    call_id: str | None = "call_stream",
+) -> list[dict[str, Any]]:
+    added = {
+        "id": item_id,
+        "type": "custom_tool_call",
+        "status": "in_progress",
+        "call_id": call_id,
+        "name": "emit_probe",
+        "input": "",
+    }
+    done = {**added, "status": "completed", "input": '{"city":"Tokyo"}'}
+    events: list[dict[str, Any]] = [
+        {
+            "type": "response.created",
+            "response": {
+                "id": "resp_custom",
+                "created_at": 13,
+                "status": "in_progress",
+                "model": "SENSITIVE_UPSTREAM_MODEL",
+            },
+        },
+        {
+            "type": "response.in_progress",
+            "response": {
+                "id": "resp_custom",
+                "created_at": 13,
+                "status": "in_progress",
+                "model": "SENSITIVE_SECOND_UPSTREAM_MODEL",
+            },
+        },
+        {"type": "response.output_item.added", "output_index": 0, "item": added},
+        {
+            "type": "response.custom_tool_call_input.delta",
+            "output_index": 0,
+            "item_id": item_id,
+            "delta": '{"city":"Tokyo"}',
+            "obfuscation": "SENSITIVE_OBFUSCATION",
+        },
+        {
+            "type": "response.custom_tool_call_input.done",
+            "output_index": 0,
+            "item_id": item_id,
+            "input": '{"city":"Tokyo"}',
+        },
+        {"type": "response.output_item.done", "output_index": 0, "item": done},
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_custom",
+                "object": "response",
+                "created_at": 13,
+                "status": "completed",
+                "model": "SENSITIVE_TERMINAL_UPSTREAM_MODEL",
+                "output": [],
+                "usage": {
+                    "input_tokens": 1,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens": 2,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 3,
+                },
+            },
+        },
+    ]
+    for sequence, event in enumerate(events):
+        event["sequence_number"] = sequence
+    return events
+
+
+@pytest.mark.asyncio
+async def test_custom_tool_stream_projects_exact_live_lifecycle_and_restores_output() -> None:
+    frames = await _translate(
+        _custom_tool_events(),
+        document=_custom_tool_document(),
+        upstream_done=False,
+    )
+
+    assert frames[-1] == b"data: [DONE]\n\n"
+    decoded = [_decode(frame) for frame in frames[:-1]]
+    assert [name for name, _ in decoded] == [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.custom_tool_call_input.delta",
+        "response.custom_tool_call_input.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    created = decoded[0][1]
+    added = decoded[2][1]["item"]
+    delta = decoded[3][1]
+    input_done = decoded[4][1]
+    done = decoded[5][1]["item"]
+    expected_added = {
+        "id": "ctc_stream",
+        "type": "custom_tool_call",
+        "call_id": "call_stream",
+        "name": "emit_probe",
+        "input": "",
+    }
+    expected_done = {**expected_added, "input": '{"city":"Tokyo"}'}
+    assert created["response"]["tools"] == [{"type": "custom", "name": "emit_probe"}]
+    assert created["response"]["tool_choice"] == {
+        "type": "custom",
+        "name": "emit_probe",
+    }
+    assert created["response"]["parallel_tool_calls"] is False
+    assert added == expected_added
+    assert delta == {
+        "type": "response.custom_tool_call_input.delta",
+        "sequence_number": 3,
+        "output_index": 0,
+        "item_id": "ctc_stream",
+        "delta": '{"city":"Tokyo"}',
+    }
+    assert input_done == {
+        "type": "response.custom_tool_call_input.done",
+        "sequence_number": 4,
+        "output_index": 0,
+        "item_id": "ctc_stream",
+        "input": '{"city":"Tokyo"}',
+    }
+    assert done == expected_done
+    completed = decoded[-1][1]["response"]
+    assert completed["output"] == [expected_done]
+    assert "SENSITIVE" not in repr(decoded)
+
+    ResponseCustomToolCall.model_validate(added)
+    ResponseCustomToolCallInputDeltaEvent.model_validate(delta)
+    ResponseCustomToolCallInputDoneEvent.model_validate(input_done)
+    ResponseCustomToolCall.model_validate(done)
+    ResponseCompletedEvent.model_validate(decoded[-1][1])
+    ResponseOutputItemDoneEvent.model_validate(decoded[5][1])
+    ResponseCreatedEvent.model_validate(created)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_case",
+    [
+        "wrong_event_order",
+        "missing_in_progress",
+        "wrong_output_index",
+        "wrong_item_id",
+        "wrong_done_item_id",
+        "wrong_done_call_id",
+        "wrong_name",
+        "wrong_added_status",
+        "wrong_added_input",
+        "extra_added_field",
+        "input_done_mismatch",
+        "done_input_mismatch",
+        "oversized_delta",
+        "invalid_obfuscation",
+        "extra_delta_field",
+        "extra_input_done_field",
+        "extra_done_field",
+        "mixed_message",
+        "mixed_function",
+        "mixed_compaction",
+        "unknown_nonterminal_event",
+        "nonempty_completed_output",
+        "contradictory_completed_output",
+        "duplicate_history_item_id",
+        "duplicate_history_call_id",
+    ],
+)
+async def test_custom_tool_stream_rejects_malformed_lifecycle(invalid_case: str) -> None:
+    events = _custom_tool_events()
+    document = _custom_tool_document()
+    if invalid_case == "wrong_event_order":
+        events[3], events[4] = events[4], events[3]
+    elif invalid_case == "missing_in_progress":
+        events.pop(1)
+    elif invalid_case == "wrong_output_index":
+        events[3]["output_index"] = 1
+    elif invalid_case == "wrong_item_id":
+        events[3]["item_id"] = "ctc_other"
+    elif invalid_case in {"wrong_done_item_id", "wrong_done_call_id"}:
+        item = events[5]["item"]
+        assert isinstance(item, dict)
+        field = "id" if invalid_case == "wrong_done_item_id" else "call_id"
+        item[field] = "wrong_identity"
+    elif invalid_case == "wrong_name":
+        for index in (2, 5):
+            item = events[index]["item"]
+            assert isinstance(item, dict)
+            item["name"] = "other"
+    elif invalid_case == "wrong_added_status":
+        item = events[2]["item"]
+        assert isinstance(item, dict)
+        item["status"] = "completed"
+    elif invalid_case == "wrong_added_input":
+        item = events[2]["item"]
+        assert isinstance(item, dict)
+        item["input"] = "premature"
+    elif invalid_case == "extra_added_field":
+        item = events[2]["item"]
+        assert isinstance(item, dict)
+        item["extra"] = "SENSITIVE_EXTRA"
+    elif invalid_case == "input_done_mismatch":
+        events[4]["input"] = "mismatch"
+    elif invalid_case == "done_input_mismatch":
+        item = events[5]["item"]
+        assert isinstance(item, dict)
+        item["input"] = "mismatch"
+    elif invalid_case == "oversized_delta":
+        oversized = "x" * 4097
+        events[3]["delta"] = oversized
+        events[4]["input"] = oversized
+        item = events[5]["item"]
+        assert isinstance(item, dict)
+        item["input"] = oversized
+    elif invalid_case == "invalid_obfuscation":
+        events[3]["obfuscation"] = 1
+    elif invalid_case == "extra_delta_field":
+        events[3]["extra"] = "SENSITIVE_EXTRA"
+    elif invalid_case == "extra_input_done_field":
+        events[4]["extra"] = "SENSITIVE_EXTRA"
+    elif invalid_case == "extra_done_field":
+        item = events[5]["item"]
+        assert isinstance(item, dict)
+        item["extra"] = "SENSITIVE_EXTRA"
+    elif invalid_case == "mixed_message":
+        events.insert(
+            2,
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "msg_mixed",
+                    "type": "message",
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": [],
+                },
+            },
+        )
+        for event in events[3:7]:
+            if "output_index" in event:
+                event["output_index"] = 1
+    elif invalid_case == "mixed_function":
+        item = events[2]["item"]
+        assert isinstance(item, dict)
+        item.clear()
+        item.update(
+            {
+                "id": "fc_mixed",
+                "type": "function_call",
+                "status": "in_progress",
+                "call_id": "call_mixed",
+                "name": "emit_probe",
+                "arguments": "",
+            }
+        )
+    elif invalid_case == "mixed_compaction":
+        item = events[2]["item"]
+        assert isinstance(item, dict)
+        item.clear()
+        item.update(
+            {
+                "id": "cmp_mixed",
+                "type": "compaction",
+                "encrypted_content": "bWl4ZWQ=",
+            }
+        )
+    elif invalid_case == "unknown_nonterminal_event":
+        events.insert(3, {"type": "response.future.delta", "secret": "SENSITIVE_UNKNOWN"})
+    elif invalid_case in {"nonempty_completed_output", "contradictory_completed_output"}:
+        response = events[-1]["response"]
+        done_item = events[5]["item"]
+        assert isinstance(response, dict)
+        assert isinstance(done_item, dict)
+        response["output"] = [dict(done_item)]
+        if invalid_case == "contradictory_completed_output":
+            response["output"][0]["input"] = "contradiction"
+    elif invalid_case == "duplicate_history_item_id":
+        document["input"] = [
+            {
+                "id": "ctc_stream",
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [],
+                "encrypted_content": "aGlzdG9yeQ==",
+            },
+            {"role": "user", "content": "continue"},
+        ]
+    else:
+        document["input"] = [
+            {
+                "id": "ctc_history",
+                "type": "custom_tool_call",
+                "call_id": "call_stream",
+                "name": "emit_probe",
+                "input": "old input",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_stream",
+                "output": "old output",
+            },
+            {"role": "user", "content": "continue"},
+        ]
+    for sequence, event in enumerate(events):
+        event["sequence_number"] = sequence
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$") as caught:
+        await _translate(events, document=document, upstream_done=False)
+    assert "SENSITIVE" not in repr(caught.value)
+
+
+def _synthesized_custom_ids(*, response_id: str, output_index: int) -> tuple[str, str]:
+    digest = hashlib.sha256(
+        f"codex-openai-bridge:custom-tool-call\0{response_id}\0{output_index}".encode()
+    ).hexdigest()
+    return f"ctc_sha256_{digest}", f"call_sha256_{digest}"
+
+
+@pytest.mark.asyncio
+async def test_custom_tool_stream_synthesizes_stable_ids_for_exact_both_null_variant() -> None:
+    first_frames = await _translate(
+        _custom_tool_events(item_id=None, call_id=None),
+        document=_custom_tool_document(),
+        upstream_done=False,
+    )
+    second_frames = await _translate(
+        _custom_tool_events(item_id=None, call_id=None),
+        document=_custom_tool_document(),
+        upstream_done=False,
+    )
+
+    assert first_frames == second_frames
+    decoded = [_decode(frame) for frame in first_frames[:-1]]
+    item_id, call_id = _synthesized_custom_ids(response_id="resp_custom", output_index=0)
+    added = decoded[2][1]["item"]
+    delta = decoded[3][1]
+    input_done = decoded[4][1]
+    done = decoded[5][1]["item"]
+    completed = decoded[6][1]["response"]
+    assert added == {
+        "id": item_id,
+        "type": "custom_tool_call",
+        "call_id": call_id,
+        "name": "emit_probe",
+        "input": "",
+    }
+    assert done == {**added, "input": '{"city":"Tokyo"}'}
+    assert delta["item_id"] == input_done["item_id"] == item_id
+    assert completed["output"] == [done]
+    assert None not in (added["id"], added["call_id"], delta["item_id"], input_done["item_id"])
+    ResponseCustomToolCall.model_validate(done)
+    ResponseCompletedEvent.model_validate(decoded[6][1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_case",
+    [
+        "partial_null_item_id",
+        "partial_null_call_id",
+        "done_switches_to_nonnull",
+        "done_switches_to_null",
+        "nullable_with_nonnull_delta_item_id",
+        "nonnull_with_null_delta_item_id",
+        "nullable_with_nonnull_done_item_id",
+        "nullable_synthesized_item_collision",
+        "nullable_synthesized_call_collision",
+    ],
+)
+async def test_custom_tool_stream_rejects_partial_mixed_or_colliding_nullable_identity(
+    invalid_case: str,
+) -> None:
+    nullable = invalid_case not in {"done_switches_to_null", "nonnull_with_null_delta_item_id"}
+    events = _custom_tool_events(
+        item_id=None if nullable else "ctc_stream",
+        call_id=None if nullable else "call_stream",
+    )
+    document = _custom_tool_document()
+    if invalid_case == "partial_null_item_id":
+        for index in (2, 5):
+            item = events[index]["item"]
+            assert isinstance(item, dict)
+            item["call_id"] = "call_stream"
+    elif invalid_case == "partial_null_call_id":
+        for index in (2, 5):
+            item = events[index]["item"]
+            assert isinstance(item, dict)
+            item["id"] = "ctc_stream"
+        events[3]["item_id"] = "ctc_stream"
+        events[4]["item_id"] = "ctc_stream"
+    elif invalid_case == "done_switches_to_nonnull":
+        item = events[5]["item"]
+        assert isinstance(item, dict)
+        item["id"] = "ctc_stream"
+        item["call_id"] = "call_stream"
+    elif invalid_case == "done_switches_to_null":
+        item = events[5]["item"]
+        assert isinstance(item, dict)
+        item["id"] = None
+        item["call_id"] = None
+    elif invalid_case == "nullable_with_nonnull_delta_item_id":
+        events[3]["item_id"] = "ctc_stream"
+    elif invalid_case == "nonnull_with_null_delta_item_id":
+        events[3]["item_id"] = None
+    elif invalid_case == "nullable_with_nonnull_done_item_id":
+        events[4]["item_id"] = "ctc_stream"
+    else:
+        item_id, call_id = _synthesized_custom_ids(response_id="resp_custom", output_index=0)
+        if invalid_case == "nullable_synthesized_item_collision":
+            document["input"] = [
+                {
+                    "id": item_id,
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [],
+                    "encrypted_content": "aGlzdG9yeQ==",
+                },
+                {"role": "user", "content": "continue"},
+            ]
+        else:
+            document["input"] = [
+                {
+                    "id": "ctc_history",
+                    "type": "custom_tool_call",
+                    "call_id": call_id,
+                    "name": "emit_probe",
+                    "input": "old input",
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": call_id,
+                    "output": "old output",
+                },
+                {"role": "user", "content": "continue"},
+            ]
+    for sequence, event in enumerate(events):
+        event["sequence_number"] = sequence
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
+        await _translate(events, document=document, upstream_done=False)
+
+
+@pytest.mark.asyncio
+async def test_statusless_provider_reasoning_may_precede_custom_tool_stream() -> None:
+    events = _custom_tool_events()
+    reasoning_added = {
+        "id": "rs_before_custom",
+        "type": "reasoning",
+        "summary": [],
+        "content": [],
+        "encrypted_content": "dHJhbnNpZW50",
+    }
+    reasoning_done = {
+        **reasoning_added,
+        "encrypted_content": "Y2Fub25pY2Fs",
+    }
+    events[2:2] = [
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": reasoning_added,
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": reasoning_done,
+        },
+    ]
+    for event in events[4:8]:
+        if "output_index" in event:
+            event["output_index"] = 1
+    for sequence, event in enumerate(events):
+        event["sequence_number"] = sequence
+
+    frames = await _translate(
+        events,
+        document=_custom_tool_document(),
+        upstream_done=False,
+    )
+
+    decoded = [_decode(frame) for frame in frames[:-1]]
+    completed = decoded[-1][1]["response"]
+    assert [item["type"] for item in completed["output"]] == [
+        "reasoning",
+        "custom_tool_call",
+    ]
+    assert completed["output"][0] == {
+        "id": "rs_before_custom",
+        "type": "reasoning",
+        "status": "completed",
+        "summary": [],
+        "encrypted_content": "Y2Fub25pY2Fs",
+    }
+    assert completed["output"][1]["input"] == '{"city":"Tokyo"}'
+    assert "dHJhbnNpZW50" not in repr(decoded)
+
+
 @pytest.mark.asyncio
 async def test_function_events_are_projected_and_request_tool_policy_is_enforced() -> None:
     frames = await _translate(_function_events(), document=_tool_document())
@@ -631,7 +1517,11 @@ async def test_function_events_are_projected_and_request_tool_policy_is_enforced
         await _translate(_function_events())
 
 
-def _reasoning_events(*, encrypted_content: str = "YQ==") -> list[dict[str, Any]]:
+def _reasoning_events(
+    *,
+    encrypted_content: str = "YQ==",
+    provider_statusless: bool = False,
+) -> list[dict[str, Any]]:
     events = _text_events()
     created = events.pop(0)
     completed = events.pop()
@@ -649,6 +1539,12 @@ def _reasoning_events(*, encrypted_content: str = "YQ==") -> list[dict[str, Any]
         "status": "completed",
         "encrypted_content": encrypted_content,
     }
+    if provider_statusless:
+        added.pop("status")
+        added["content"] = []
+        added["encrypted_content"] = "YWRkZWQtdHJhbnNpZW50"
+        done.pop("status")
+        done["content"] = []
     response = completed["response"]
     assert isinstance(response, dict)
     response["output"] = [done, *response["output"]]
@@ -721,7 +1617,80 @@ async def test_reasoning_events_preserve_only_canonical_encrypted_content() -> N
 
 
 @pytest.mark.asyncio
-async def test_reasoning_summary_is_strictly_validated_then_stripped() -> None:
+async def test_statusless_provider_reasoning_is_normalized_for_direct_stream() -> None:
+    frames = await _translate(_reasoning_events(provider_statusless=True))
+    decoded = [_decode(frame) for frame in frames[:-1]]
+    reasoning_items = [
+        data["item"]
+        for name, data in decoded
+        if name in {"response.output_item.added", "response.output_item.done"}
+        and data["item"]["type"] == "reasoning"
+    ]
+
+    assert reasoning_items == [
+        {
+            "id": "rs_stream",
+            "type": "reasoning",
+            "status": "in_progress",
+            "summary": [],
+        },
+        {
+            "id": "rs_stream",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [],
+            "encrypted_content": "YQ==",
+        },
+    ]
+    completed = decoded[-1][1]["response"]
+    assert completed["output"][0] == reasoning_items[1]
+    assert b"YWRkZWQtdHJhbnNpZW50" not in b"".join(frames)
+
+
+@pytest.mark.asyncio
+async def test_buffered_nonstream_normalizes_statusless_provider_reasoning(
+    tmp_path: Path,
+) -> None:
+    wire = b"".join(_event(event) for event in _reasoning_events(provider_statusless=True))
+    transport = _StreamingOnlyUpstream(wire)
+    adapter = upstream_module.BufferedResponsesUpstream(transport, _settings(tmp_path))
+
+    response = await adapter.create_response(
+        _CredentialManager().credential,
+        {"model": "server-model", "input": [], "store": False, "stream": False},
+    )
+
+    assert isinstance(response, dict)
+    assert response["output"][0] == {
+        "id": "rs_stream",
+        "type": "reasoning",
+        "status": "completed",
+        "summary": [],
+        "encrypted_content": "YQ==",
+    }
+    assert transport.stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_case", ["nonempty_content", "missing_added_blob"])
+async def test_statusless_provider_reasoning_rejects_unconfirmed_shapes(
+    invalid_case: str,
+) -> None:
+    events = _reasoning_events(provider_statusless=True)
+    added = events[1]["item"]
+    assert isinstance(added, dict)
+    if invalid_case == "nonempty_content":
+        added["content"] = [{"type": "reasoning_text", "text": "SENSITIVE"}]
+    else:
+        added.pop("encrypted_content")
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$") as caught:
+        await _translate(events)
+    assert "SENSITIVE" not in repr(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_reasoning_summary_is_strictly_validated_then_preserved() -> None:
     events = _reasoning_events()
     summary = [{"type": "summary_text", "text": "SENSITIVE SUMMARY"}]
     for event in events:
@@ -731,7 +1700,15 @@ async def test_reasoning_summary_is_strictly_validated_then_stripped() -> None:
             if item["type"] == "reasoning":
                 item["summary"] = summary
 
-    frames = await _translate(events)
+    frames = await _translate(
+        events,
+        document={
+            "model": "codex",
+            "input": "hello",
+            "stream": True,
+            "reasoning": {"summary": "auto"},
+        },
+    )
     decoded = [_decode(frame) for frame in frames[:-1]]
     reasoning_items = [
         data["item"]
@@ -740,8 +1717,24 @@ async def test_reasoning_summary_is_strictly_validated_then_stripped() -> None:
         and data["item"]["type"] == "reasoning"
     ]
     assert reasoning_items
-    assert all(item["summary"] == [] for item in reasoning_items)
-    assert b"SENSITIVE SUMMARY" not in b"".join(frames)
+    assert all(item["summary"] == summary for item in reasoning_items)
+    assert b"SENSITIVE SUMMARY" in b"".join(frames)
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_unsolicited_reasoning_summary() -> None:
+    events = _reasoning_events()
+    for event in events:
+        if event["type"] in {"response.output_item.added", "response.output_item.done"}:
+            item = event["item"]
+            assert isinstance(item, dict)
+            if item["type"] == "reasoning":
+                item["summary"] = [{"type": "summary_text", "text": "UNSOLICITED STREAM SUMMARY"}]
+
+    with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$") as caught:
+        await _translate(events)
+
+    assert "UNSOLICITED STREAM SUMMARY" not in repr(caught.value)
 
 
 @pytest.mark.asyncio

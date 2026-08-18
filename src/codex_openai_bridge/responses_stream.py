@@ -8,6 +8,7 @@ from typing import Any
 
 from codex_openai_bridge.models import ParsedSseEvent
 from codex_openai_bridge.responses import (
+    NamedCustomToolChoice,
     ResponsesRequest,
     responses_public_snapshot,
     responses_to_public,
@@ -32,6 +33,8 @@ _KNOWN_EVENTS = frozenset(
         "response.content_part.done",
         "response.function_call_arguments.delta",
         "response.function_call_arguments.done",
+        "response.custom_tool_call_input.delta",
+        "response.custom_tool_call_input.done",
         "response.output_item.done",
         "response.completed",
     }
@@ -80,6 +83,8 @@ def _project_item(
     value: object,
     *,
     status: str,
+    allow_compaction: bool,
+    allow_reasoning_summary: bool,
     max_string_bytes: int,
 ) -> dict[str, Any]:
     if type(value) is not dict:
@@ -102,13 +107,16 @@ def _project_item(
             if type(part) is not dict or type(part.get("text")) is not str:
                 raise _invalid()
             parts.append(_project_text_part(part, expected_text=part["text"]))
-        return {
+        message_result = {
             "id": value["id"],
             "type": "message",
             "status": status,
             "role": "assistant",
             "content": parts,
         }
+        if "phase" in value:
+            message_result["phase"] = value["phase"]
+        return message_result
     if item_type == "function_call":
         if set(value) != {"id", "type", "status", "call_id", "name", "arguments"}:
             raise _invalid()
@@ -123,6 +131,22 @@ def _project_item(
             "arguments": value["arguments"],
         }
     if item_type == "reasoning":
+        provider_fields = {"id", "type", "summary", "content", "encrypted_content"}
+        if set(value) == provider_fields:
+            if value["summary"] != [] or value["content"] != []:
+                raise _invalid()
+            result: dict[str, Any] = {
+                "id": validate_responses_identifier(value["id"]),
+                "type": "reasoning",
+                "status": status,
+                "summary": [],
+            }
+            encrypted_content = validate_encrypted_reasoning_content(
+                value["encrypted_content"], max_string_bytes=max_string_bytes
+            )
+            if status == "completed":
+                result["encrypted_content"] = encrypted_content
+            return result
         required = {"id", "type", "status", "summary"}
         optional = {"encrypted_content"} if status == "completed" else set()
         if not required <= set(value) or not set(value) <= required | optional:
@@ -140,11 +164,13 @@ def _project_item(
             )
         ):
             raise _invalid()
+        if summary and not allow_reasoning_summary:
+            raise _invalid()
         result = {
             "id": value["id"],
             "type": "reasoning",
             "status": status,
-            "summary": [],
+            "summary": [{"type": "summary_text", "text": part["text"]} for part in summary],
         }
         if status == "completed":
             if "encrypted_content" not in value:
@@ -153,6 +179,16 @@ def _project_item(
                 value["encrypted_content"], max_string_bytes=max_string_bytes
             )
         return result
+    if item_type == "compaction":
+        if not allow_compaction or set(value) != {"id", "type", "encrypted_content"}:
+            raise _invalid()
+        return {
+            "id": validate_responses_identifier(value["id"]),
+            "type": "compaction",
+            "encrypted_content": validate_encrypted_reasoning_content(
+                value["encrypted_content"], max_string_bytes=max_string_bytes
+            ),
+        }
     raise _invalid()
 
 
@@ -182,8 +218,20 @@ class ResponsesSseTranslator:
         self._max_string_bytes = max_string_bytes
         self._validator = ResponsesStreamValidator(
             public_model=public_model,
+            allow_compaction=request.context_management is not None,
             max_unknown_events=max_json_nodes,
             max_string_bytes=max_string_bytes,
+            initial_item_ids=request.historical_item_ids,
+            initial_encrypted_digests=request.historical_reasoning_digests,
+            custom_tool_name=(
+                request.custom_tool.name
+                if request.custom_tool is not None
+                and isinstance(request.custom_tool_choice, NamedCustomToolChoice)
+                else None
+            ),
+            max_items=max_items,
+            max_tools=max_tools,
+            initial_call_ids=request.historical_call_ids,
         )
         self._parsed = parse_responses_sse(
             chunks,
@@ -198,6 +246,7 @@ class ResponsesSseTranslator:
         self._item_count = 0
         self._message_count = 0
         self._function_count = 0
+        self._custom_count = 0
         self._function_phase = False
         self._visible_output = False
         self._declared_tool_names = {tool.name for tool in request.tools}
@@ -266,11 +315,22 @@ class ResponsesSseTranslator:
             )
         if event_type in {"response.output_item.added", "response.output_item.done"}:
             status = "in_progress" if event_type.endswith("added") else "completed"
-            item = _project_item(
-                event["item"],
-                status=status,
-                max_string_bytes=self._max_string_bytes,
-            )
+            raw_item = event["item"]
+            if type(raw_item) is dict and raw_item.get("type") == "custom_tool_call":
+                item = self._validator.custom_public_item(
+                    event["output_index"], completed=status == "completed"
+                )
+            else:
+                item = _project_item(
+                    raw_item,
+                    status=status,
+                    allow_compaction=self._request.context_management is not None,
+                    allow_reasoning_summary=(
+                        self._request.reasoning is not None
+                        and self._request.reasoning.summary is not None
+                    ),
+                    max_string_bytes=self._max_string_bytes,
+                )
             item_id = validate_responses_identifier(item.get("id"))
             if item_id == self._response_id:
                 raise _invalid()
@@ -308,10 +368,35 @@ class ResponsesSseTranslator:
                 elif item["type"] == "reasoning":
                     if self._function_phase or self._visible_output:
                         raise _invalid()
+                elif item["type"] == "custom_tool_call":
+                    call_id = validate_responses_identifier(item.get("call_id"))
+                    name = validate_responses_identifier(item.get("name"))
+                    self._custom_count += 1
+                    if (
+                        self._request.custom_tool is None
+                        or not isinstance(self._request.custom_tool_choice, NamedCustomToolChoice)
+                        or name != self._request.custom_tool.name
+                        or name != self._request.custom_tool_choice.name
+                        or call_id in self._call_ids
+                        or self._custom_count > 1
+                        or self._custom_count > self._max_tools
+                        or self._visible_output
+                    ):
+                        raise _invalid()
+                    self._call_ids.add(call_id)
+                    self._visible_output = True
             elif item["type"] == "reasoning":
                 encrypted = item.get("encrypted_content")
                 digest = encrypted_reasoning_data_digest(
                     encrypted,
+                    max_string_bytes=self._max_string_bytes,
+                )
+                if digest is None or digest in self._reasoning_digests:
+                    raise _invalid()
+                self._reasoning_digests.add(digest)
+            elif item["type"] == "compaction":
+                digest = encrypted_reasoning_data_digest(
+                    item["encrypted_content"],
                     max_string_bytes=self._max_string_bytes,
                 )
                 if digest is None or digest in self._reasoning_digests:
@@ -371,6 +456,22 @@ class ResponsesSseTranslator:
                     "output_index": event["output_index"],
                     value_field: event[value_field],
                     "sequence_number": sequence,
+                },
+            )
+        if event_type in {
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.done",
+        }:
+            output_index = event["output_index"]
+            value_field = "delta" if event_type.endswith("delta") else "input"
+            return _frame(
+                event_type,
+                {
+                    "type": event_type,
+                    "sequence_number": sequence,
+                    "output_index": output_index,
+                    "item_id": self._validator.custom_public_item_id(output_index),
+                    value_field: event[value_field],
                 },
             )
         if event_type == "response.completed":

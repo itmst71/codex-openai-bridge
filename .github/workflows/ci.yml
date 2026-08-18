@@ -35,6 +35,14 @@ jobs:
       - name: Test
         run: uv run pytest -q
 
+      - name: Contract test with OpenAI SDK 3.1.0
+        run: >-
+          uv run --isolated --no-dev
+          --with openai==3.1.0
+          --with pytest==8.4.2
+          --with pytest-asyncio==1.2.0
+          pytest -q tests/contract
+
       - name: Type-check
         run: uv run mypy src tests scripts
 
