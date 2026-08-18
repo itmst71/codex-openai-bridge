@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/downloads/)
 
-A bounded, loopback-only OpenAI-compatible HTTP bridge for the Codex Responses backend. It lets consumers such as the OpenAI Python SDK and Honcho use a stable public model alias (`codex`) while keeping the upstream URL, OAuth authorization, account ID, and real model under server control.
+A bounded, loopback-only OpenAI-compatible HTTP bridge for the Codex Responses backend. It lets consumers such as the OpenAI Python SDK, Honcho, LangChain, and the OpenAI Agents SDK use a stable public model alias (`codex`) while keeping the upstream URL, OAuth authorization, account ID, and real model under server control.
 
 This project is an independent translation service. It does **not** run the Hermes agent loop, system prompt, memory, or tools.
 
@@ -232,6 +232,67 @@ Responses backend rejects `max_output_tokens`. The bridge still enforces its
 configured total deadline, upstream/downstream byte caps, SSE-event cap, and
 JSON bounds. Do not rely on a Honcho `max_tokens` value as an exact generation
 limit when this bridge is the text backend.
+
+## Verified consumer compatibility
+
+Provider capability and consumer compatibility are separate contracts. The bridge keeps the
+Codex-backed API subset narrow while testing each consumer's real emitted HTTP shape through the
+loopback route, strict parser, upstream projection, and consumer-native response parser.
+
+| Consumer | Verified version | Supported contract | Important limits |
+| --- | --- | --- | --- |
+| OpenAI Python SDK | 1.109.1 and 3.1.0 | Chat/Responses non-stream and stream, structured output, function/custom tools, usage; native compaction on 3.1.0 | Use `max_retries=0`; unsupported OpenAI API surfaces remain rejected |
+| Honcho | request shapes from revision `444897975c95393b0d48024470ece03c025d3aa4` | text generation, structured derivation, tool loop | Embeddings require a separate backend |
+| LangChain `ChatOpenAI` | `langchain-openai` 1.5.1, `langchain-core` 1.5.6, OpenAI SDK 3.2.0 | Responses non-stream/stream and Pydantic JSON Schema; Responses and Chat Completions function-tool result round-trip | Set `temperature=None`, `max_retries=0`, and choose `use_responses_api` explicitly; tool descriptions must be nonempty |
+| OpenAI Agents SDK | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | `OpenAIChatCompletionsModel` text, stream, and local `function_tool` loop | Disable tracing for bridge-only use; `OpenAIResponsesModel`, sessions, and hosted tools are not claimed |
+
+These framework packages are isolated CI contract dependencies, not bridge runtime dependencies.
+Their tests use synthetic credentials and deterministic upstream fixtures, so normal project tests
+and production deployment do not install or contact the frameworks' external services.
+
+### LangChain
+
+```python
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(
+    model="codex",
+    base_url="http://127.0.0.1:8646/v1",
+    api_key=bridge_token,
+    temperature=None,
+    max_retries=0,
+    timeout=240,
+    use_responses_api=True,
+)
+```
+
+Set `use_responses_api=False` to select the verified Chat Completions path instead. Pydantic models
+and functions supplied through `bind_tools` need a nonempty docstring/description. A missing
+description can become `description=""`, which the bridge intentionally rejects rather than
+weakening its exact tool contract. Configure embeddings separately.
+
+### OpenAI Agents SDK
+
+```python
+from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled
+from openai import AsyncOpenAI
+
+set_tracing_disabled(True)
+client = AsyncOpenAI(
+    base_url="http://127.0.0.1:8646/v1",
+    api_key=bridge_token,
+    max_retries=0,
+    timeout=240,
+)
+model = OpenAIChatCompletionsModel(model="codex", openai_client=client)
+agent = Agent(name="bounded-agent", instructions="Answer briefly.", model=model)
+```
+
+Tracing is disabled in the verified bridge-only configuration because tracing is a separate external
+API surface. Local `function_tool` calls with nonempty docstrings are verified. The Agents SDK's
+`OpenAIResponsesModel` currently emits fields outside the strict bridge Responses subset; use the
+verified Chat Completions model rather than treating the entire SDK as unsupported or relaxing the
+bridge parser.
 
 ## curl example
 

@@ -43,6 +43,25 @@ jobs:
           --with pytest-asyncio==1.2.0
           pytest -q tests/contract
 
+      - name: Consumer contract with LangChain 1.5.1
+        run: >-
+          uv run --isolated --no-dev
+          --with langchain-openai==1.5.1
+          --with langchain-core==1.5.6
+          --with openai==3.2.0
+          --with pytest==8.4.2
+          --with pytest-asyncio==1.2.0
+          pytest -q tests/consumer_contract/test_langchain.py
+
+      - name: Consumer contract with OpenAI Agents SDK 0.21.1
+        run: >-
+          uv run --isolated --no-dev
+          --with openai-agents==0.21.1
+          --with openai==3.2.0
+          --with pytest==8.4.2
+          --with pytest-asyncio==1.2.0
+          pytest -q tests/consumer_contract/test_openai_agents.py
+
       - name: Type-check
         run: uv run mypy src tests scripts
 
