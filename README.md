@@ -245,6 +245,7 @@ loopback route, strict parser, upstream projection, and consumer-native response
 | Honcho | request shapes from revision `444897975c95393b0d48024470ece03c025d3aa4` | text generation, structured derivation, tool loop | Embeddings require a separate backend |
 | LangChain `ChatOpenAI` | `langchain-openai` 1.5.1, `langchain-core` 1.5.6, OpenAI SDK 3.2.0 | Responses non-stream/stream and Pydantic JSON Schema; Responses and Chat Completions function-tool result round-trip | Set `temperature=None`, `max_retries=0`, and choose `use_responses_api` explicitly; tool descriptions must be nonempty |
 | OpenAI Agents SDK | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | `OpenAIChatCompletionsModel` text, stream, and local `function_tool` loop | Disable tracing for bridge-only use; `OpenAIResponsesModel`, sessions, and hosted tools are not claimed |
+| AutoGen | `autogen-ext`/`autogen-core`/`autogen-agentchat` 0.7.5, OpenAI SDK 3.2.0 | Direct non-stream/stream and Pydantic JSON Schema; one `AssistantAgent` local function-tool/reflection loop through Chat Completions | Use explicit model metadata, zero retries, no message names, and the conditional parallel-tools adapter below; teams, code execution, memory, and hosted agents are not claimed |
 | Aider | `aider-chat` 0.86.2, LiteLLM 1.81.10, OpenAI SDK 2.20.0 | One-shot CLI `--message` performs a streaming `whole`-format edit of an existing file through Chat Completions | Use the model settings below; auto-commit, repo map, other edit formats/modes, and Aider's failure-retry behavior are not claimed |
 | Continue core OpenAI provider | `@continuedev/core` 1.1.0, `tsx` 4.23.12 | Public `streamChat`, Edit-role `streamComplete`, and non-stream function-tool result round-trip through Chat Completions | Use Chat/Edit roles with no sampling defaults and a separate embedding provider; Apply/file mutation, current `cn` CLI, and IDE UI integration are not claimed |
 
@@ -295,6 +296,46 @@ API surface. Local `function_tool` calls with nonempty docstrings are verified. 
 `OpenAIResponsesModel` currently emits fields outside the strict bridge Responses subset; use the
 verified Chat Completions model rather than treating the entire SDK as unsupported or relaxing the
 bridge parser.
+
+### AutoGen
+
+AutoGen's OpenAI-compatible model client needs explicit capabilities for the unknown public alias
+and must omit sampling/name fields:
+
+```python
+from autogen_core.models import ModelFamily
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+
+client = OpenAIChatCompletionClient(
+    model="codex",
+    base_url="http://127.0.0.1:8646/v1",
+    api_key=bridge_token,
+    model_info={
+        "vision": False,
+        "function_calling": True,
+        "json_output": True,
+        "family": ModelFamily.UNKNOWN,
+        "structured_output": True,
+    },
+    max_retries=0,
+    timeout=240,
+    include_name_in_message=False,
+)
+```
+
+For an `AssistantAgent` reflection loop, setting `parallel_tool_calls=False` on the constructor is
+not sufficient: AutoGen also sends it on the later reflection request after removing `tools`, which
+the strict bridge correctly rejects. The verified
+`BridgeOpenAIChatCompletionClient` adapter in
+`tests/consumer_contract/test_autogen.py` adds that field only when a request actually contains
+tools. It preserves AutoGen's normal direct client, local tool execution, tool-result replay, and
+reflected final answer without weakening the gateway contract.
+
+The permanent matrix verifies direct non-stream text, token streaming with a final `CreateResult`,
+Pydantic JSON Schema output, and one fresh `AssistantAgent` local function-tool/reflection run. It
+does not claim teams, handoffs, code execution, web/file surfers, MCP/workbenches, model cache,
+memory, image input, hosted assistants, or multi-agent state. Configure embeddings separately and
+always close the model client.
 
 ### Aider
 

@@ -64,6 +64,17 @@ jobs:
           --with pytest-asyncio==1.2.0
           pytest -q tests/consumer_contract/test_openai_agents.py
 
+      - name: Consumer contract with AutoGen 0.7.5
+        run: >-
+          uv run --isolated --python 3.12 --no-dev
+          --with 'autogen-ext[openai]==0.7.5'
+          --with autogen-core==0.7.5
+          --with autogen-agentchat==0.7.5
+          --with openai==3.2.0
+          --with pytest==8.4.2
+          --with pytest-asyncio==1.2.0
+          pytest -q tests/consumer_contract/test_autogen.py
+
       - name: Consumer contract with Aider 0.86.2
         run: >-
           uv run --isolated --python 3.12 --no-dev
