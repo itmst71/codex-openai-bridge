@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from collections import deque
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from aiohttp import web
 from aiohttp.test_utils import TestServer
 from openai import AsyncOpenAI
 
@@ -101,6 +102,7 @@ class RunningContractServer:
     upstream: RecordingUpstream
     settings: Settings
     provider: StaticCredentialProvider
+    request_paths: list[str]
 
 
 @asynccontextmanager
@@ -124,7 +126,19 @@ async def contract_server(
     upstream = RecordingUpstream(responses=responses, streams=streams)
     provider = StaticCredentialProvider()
     app_upstream = BufferedResponsesUpstream(upstream, settings) if buffered_nonstream else upstream
-    server = TestServer(create_app(settings, provider, upstream=app_upstream))
+    request_paths: list[str] = []
+
+    @web.middleware
+    async def record_request_path(
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
+        request_paths.append(request.path)
+        return await handler(request)
+
+    app = create_app(settings, provider, upstream=app_upstream)
+    app.middlewares.insert(0, record_request_path)
+    server = TestServer(app)
     await server.start_server()
     client = AsyncOpenAI(
         api_key=CLIENT_TOKEN,
@@ -138,6 +152,7 @@ async def contract_server(
             upstream=upstream,
             settings=settings,
             provider=provider,
+            request_paths=request_paths,
         )
     finally:
         await client.close()

@@ -245,6 +245,7 @@ loopback route, strict parser, upstream projection, and consumer-native response
 | Honcho | request shapes from revision `444897975c95393b0d48024470ece03c025d3aa4` | text generation, structured derivation, tool loop | Embeddings require a separate backend |
 | LangChain `ChatOpenAI` | `langchain-openai` 1.5.1, `langchain-core` 1.5.6, OpenAI SDK 3.2.0 | Responses non-stream/stream and Pydantic JSON Schema; Responses and Chat Completions function-tool result round-trip | Set `temperature=None`, `max_retries=0`, and choose `use_responses_api` explicitly; tool descriptions must be nonempty |
 | OpenAI Agents SDK | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | `OpenAIChatCompletionsModel` text, stream, and local `function_tool` loop | Disable tracing for bridge-only use; `OpenAIResponsesModel`, sessions, and hosted tools are not claimed |
+| Aider | `aider-chat` 0.86.2, LiteLLM 1.81.10, OpenAI SDK 2.20.0 | One-shot CLI `--message` performs a streaming `whole`-format edit of an existing file through Chat Completions | Use the model settings below; auto-commit, repo map, other edit formats/modes, and Aider's failure-retry behavior are not claimed |
 
 These framework packages are isolated CI contract dependencies, not bridge runtime dependencies.
 Their tests use synthetic credentials and deterministic upstream fixtures, so normal project tests
@@ -293,6 +294,113 @@ API surface. Local `function_tool` calls with nonempty docstrings are verified. 
 `OpenAIResponsesModel` currently emits fields outside the strict bridge Responses subset; use the
 verified Chat Completions model rather than treating the entire SDK as unsupported or relaxing the
 bridge parser.
+
+### Aider
+
+Aider uses an OpenAI-compatible Chat Completions endpoint. Register the unknown public alias with a
+non-secret model settings file outside the target repository, for example at
+`$HOME/.config/codex-openai-bridge/aider-model-settings.yml`, so Aider does not send an unsupported
+sampling control:
+
+```yaml
+- name: openai/codex
+  edit_format: whole
+  weak_model_name: null
+  use_repo_map: false
+  use_temperature: false
+  streaming: true
+  cache_control: false
+  caches_by_default: false
+```
+
+Aider also attempts to refresh unknown-model metadata unless it is given a local definition. Store this
+second non-secret file outside the target repository, for example as
+`$HOME/.config/codex-openai-bridge/aider-model-metadata.json`:
+
+```json
+{
+  "openai/codex": {
+    "max_tokens": 200000,
+    "max_input_tokens": 200000,
+    "max_output_tokens": 100000,
+    "input_cost_per_token": 0,
+    "output_cost_per_token": 0,
+    "litellm_provider": "openai",
+    "mode": "chat"
+  }
+}
+```
+
+The reproducibly verified role is a one-shot edit, not Aider's default interactive mode. This example
+keeps Aider state outside the target repository, disables the side effects covered by the contract,
+and forces LiteLLM to use its bundled model-cost map:
+
+```bash
+control_dir="$(mktemp -d)"
+trap 'rm -rf -- "$control_dir"' EXIT
+printf '{}\n' > "$control_dir/aider.conf.yml"
+: > "$control_dir/empty.env"
+IFS= read -r OPENAI_API_KEY \
+  < "$HOME/.config/codex-openai-bridge/client-token"
+export OPENAI_API_KEY LITELLM_LOCAL_MODEL_COST_MAP=True
+
+aider \
+  --model openai/codex \
+  --openai-api-base http://127.0.0.1:8646/v1 \
+  --model-settings-file "$HOME/.config/codex-openai-bridge/aider-model-settings.yml" \
+  --model-metadata-file "$HOME/.config/codex-openai-bridge/aider-model-metadata.json" \
+  --config "$control_dir/aider.conf.yml" \
+  --env-file "$control_dir/empty.env" \
+  --input-history-file "$control_dir/input.history" \
+  --chat-history-file "$control_dir/chat.history.md" \
+  --edit-format whole \
+  --message "Set VALUE to 2." \
+  --file target.py \
+  --stream \
+  --yes-always \
+  --no-auto-commits \
+  --no-dirty-commits \
+  --no-gitignore \
+  --no-attribute-author \
+  --no-attribute-committer \
+  --no-attribute-co-authored-by \
+  --no-auto-lint \
+  --no-auto-test \
+  --no-watch-files \
+  --no-cache-prompts \
+  --map-tokens 0 \
+  --no-analytics \
+  --no-check-update \
+  --no-show-release-notes \
+  --no-show-model-warnings \
+  --no-check-model-accepts-settings \
+  --no-pretty \
+  --no-fancy-input \
+  --no-notifications \
+  --no-detect-urls \
+  --no-suggest-shell-commands \
+  --no-gui \
+  --no-copy-paste \
+  --disable-playwright \
+  --timeout 240 \
+  --encoding utf-8 \
+  --line-endings lf
+
+unset OPENAI_API_KEY LITELLM_LOCAL_MODEL_COST_MAP
+```
+
+The permanent contract drives the real Aider CLI in `--message` mode, receives one streaming
+whole-file listing from the production-like loopback bridge, edits exactly one tracked file, creates
+no repository artifact, and leaves Git HEAD unchanged. Aider 0.86.2 contains its own bounded
+transient-API retry loop, which is separate from the OpenAI SDK `max_retries=0` guidance used by
+other consumers; the verified Aider role performs text editing only and has no model tool calls or
+auto-commit side effect. Architect mode, weak/editor model flows, repo map, auto-commit, lint/test
+repair loops, `diff`/`udiff` formats, image input, and interactive multi-turn behavior remain
+unclaimed until individually tested.
+
+The versions in this matrix are reproducible known-good baselines, not a runtime allowlist. The
+bridge never receives package versions: newer consumers remain usable when their emitted HTTP
+payload still satisfies the same strict contract.
 
 ## curl example
 

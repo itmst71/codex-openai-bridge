@@ -7,7 +7,7 @@ import secrets
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 from aiohttp import hdrs, web
 from aiohttp.http import HttpVersion11
@@ -75,9 +75,19 @@ _CANONICAL_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _READINESS_EXPIRY_SKEW_SECONDS = 60
 _REQUEST_ID_BYTES = 16
 _REQUEST_ID_HEADER = "X-Request-ID"
-_REQUEST_ID_KEY = web.RequestKey("request_id", str)
-_PREPARED_RESPONSE_KEY = web.RequestKey("prepared_response", web.StreamResponse)
-_ADMISSION_LEASE_KEY = web.RequestKey("admission_lease", AdmissionLease)
+
+
+def _request_key(name: str, value_type: type[object]) -> Any:
+    qualified_name = f"codex_openai_bridge.{name}"
+    factory = getattr(web, "RequestKey", None)
+    if factory is None:
+        return qualified_name
+    return factory(qualified_name, value_type)
+
+
+_REQUEST_ID_KEY = _request_key("request_id", str)
+_PREPARED_RESPONSE_KEY = _request_key("prepared_response", web.StreamResponse)
+_ADMISSION_LEASE_KEY = _request_key("admission_lease", AdmissionLease)
 _GENERATION_PATHS = frozenset({"/v1/chat/completions", "/v1/responses"})
 
 
