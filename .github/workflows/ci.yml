@@ -19,6 +19,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v6
         with:
@@ -71,6 +73,25 @@ jobs:
           --with pytest==8.4.2
           --with pytest-asyncio==1.2.0
           pytest -q tests/consumer_contract/test_aider.py
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Install locked Continue core consumer
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
+        run: |
+          install -d "$RUNNER_TEMP/continue-core"
+          cp -a tests/consumer_contract/continue_env/. "$RUNNER_TEMP/continue-core/"
+          npm ci --prefix "$RUNNER_TEMP/continue-core" \
+            --ignore-scripts --no-audit --no-fund
+
+      - name: Consumer contract with Continue core 1.1.0
+        env:
+          CONTINUE_CORE_ROOT: ${{ runner.temp }}/continue-core/node_modules/@continuedev/core
+          CONTINUE_TSX_BIN: ${{ runner.temp }}/continue-core/node_modules/.bin/tsx
+        run: uv run pytest -q tests/consumer_contract/test_continue_core.py
 
       - name: Type-check
         run: uv run mypy src tests scripts

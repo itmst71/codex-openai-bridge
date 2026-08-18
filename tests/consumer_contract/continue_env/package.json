@@ -1,0 +1,15 @@
+{
+  "name": "codex-openai-bridge-continue-contract",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Exact optional Continue core consumer contract environment",
+  "license": "MIT",
+  "dependencies": {
+    "@continuedev/core": "1.1.0",
+    "sqlite3": "file:stubs/sqlite3",
+    "tsx": "4.23.12"
+  },
+  "overrides": {
+    "sqlite3": "$sqlite3"
+  }
+}

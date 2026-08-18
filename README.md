@@ -246,6 +246,7 @@ loopback route, strict parser, upstream projection, and consumer-native response
 | LangChain `ChatOpenAI` | `langchain-openai` 1.5.1, `langchain-core` 1.5.6, OpenAI SDK 3.2.0 | Responses non-stream/stream and Pydantic JSON Schema; Responses and Chat Completions function-tool result round-trip | Set `temperature=None`, `max_retries=0`, and choose `use_responses_api` explicitly; tool descriptions must be nonempty |
 | OpenAI Agents SDK | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | `OpenAIChatCompletionsModel` text, stream, and local `function_tool` loop | Disable tracing for bridge-only use; `OpenAIResponsesModel`, sessions, and hosted tools are not claimed |
 | Aider | `aider-chat` 0.86.2, LiteLLM 1.81.10, OpenAI SDK 2.20.0 | One-shot CLI `--message` performs a streaming `whole`-format edit of an existing file through Chat Completions | Use the model settings below; auto-commit, repo map, other edit formats/modes, and Aider's failure-retry behavior are not claimed |
+| Continue core OpenAI provider | `@continuedev/core` 1.1.0, `tsx` 4.23.12 | Public `streamChat`, Edit-role `streamComplete`, and non-stream function-tool result round-trip through Chat Completions | Use Chat/Edit roles with no sampling defaults and a separate embedding provider; Apply/file mutation, current `cn` CLI, and IDE UI integration are not claimed |
 
 These framework packages are isolated CI contract dependencies, not bridge runtime dependencies.
 Their tests use synthetic credentials and deterministic upstream fixtures, so normal project tests
@@ -401,6 +402,48 @@ unclaimed until individually tested.
 The versions in this matrix are reproducible known-good baselines, not a runtime allowlist. The
 bridge never receives package versions: newer consumers remain usable when their emitted HTTP
 payload still satisfies the same strict contract.
+
+### Continue core OpenAI provider
+
+Continue separates model roles, so the bridge should serve text generation while embeddings and
+autocomplete use other providers. A matching local model entry is:
+
+```yaml
+models:
+  - name: Codex Bridge
+    provider: openai
+    model: codex
+    apiBase: http://127.0.0.1:8646/v1
+    apiKey: ${{ secrets.OPENAI_API_KEY }}
+    useLegacyCompletionsEndpoint: false
+    roles:
+      - chat
+      - edit
+    defaultCompletionOptions:
+      maxTokens: 4096
+```
+
+Do not add `temperature`, `topP`, penalties, stop words, `autocomplete`, or `embed` to this model.
+The verified package contract invokes Continue core's public `streamChat` and `streamComplete`
+methods, exercises streaming Chat and Edit-role generation, and completes a function-tool
+call/result/final-answer round-trip. All four requests use `/v1/chat/completions`, preserve the
+bridge's server-owned policy, and make no non-loopback connection.
+
+This is not yet a claim for the full Continue IDE or the current `cn` CLI. A read-only headless
+`@continuedev/cli` 1.5.47 probe successfully generated through the bridge but also attempted to
+contact `api.continue.dev` during startup, so it remains unverified until a supported local-only
+control-plane configuration is available. Autocomplete/FIM, embeddings, reranking, file application,
+agent tools, image input, and Responses API selection are likewise unclaimed.
+
+The published `@continuedev/core` 1.1.0 compiled ESM subpath is not standalone-importable on the
+reviewed Node 20/24 runtimes because one internal import lacks a file extension. The contract
+therefore executes the TypeScript source shipped in that exact package through pinned
+`tsx`, which is also the source consumed by Continue's own build. Its complete optional npm graph is
+frozen by the consumer-contract `package-lock.json`; lifecycle scripts are disabled, and the unused
+native SQLite logger dependency is replaced by a locked consumer-only stub before its logging method
+is disabled by the probe. None of those packages become bridge runtime or development dependencies.
+Continue's remaining successful-request local logs are confined to an isolated HOME in CI; telemetry
+is disabled and a self-tested socket guard rejects external network access.
 
 ## curl example
 
