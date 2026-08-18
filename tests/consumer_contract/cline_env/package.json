@@ -1,0 +1,10 @@
+{
+  "name": "codex-openai-bridge-cline-contract",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Exact optional Cline CLI consumer contract environment",
+  "license": "MIT",
+  "dependencies": {
+    "@cline/cli-linux-x64": "3.0.55"
+  }
+}

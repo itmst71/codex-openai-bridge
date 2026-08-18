@@ -89,6 +89,20 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install locked Cline CLI consumer
+        run: |
+          install -d "$RUNNER_TEMP/cline-cli"
+          cp tests/consumer_contract/cline_env/package.json \
+             tests/consumer_contract/cline_env/package-lock.json \
+             "$RUNNER_TEMP/cline-cli/"
+          npm ci --prefix "$RUNNER_TEMP/cline-cli" \
+            --ignore-scripts --no-audit --no-fund
+
+      - name: Consumer contract with Cline CLI 3.0.55
+        env:
+          CLINE_CONTRACT_PREFIX: ${{ runner.temp }}/cline-cli
+        run: uv run pytest -q tests/consumer_contract/test_cline_cli.py
+
       - name: Install locked Continue core consumer
         env:
           PUPPETEER_SKIP_DOWNLOAD: "true"
