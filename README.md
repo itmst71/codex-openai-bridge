@@ -1,5 +1,10 @@
 # codex-openai-bridge
 
+**English (canonical)** | [日本語](README.ja.md)
+
+> `README.md` is the canonical documentation. If the Japanese translation differs, the English
+> version takes precedence.
+
 [![CI](https://github.com/itmst71/codex-openai-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/itmst71/codex-openai-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/downloads/)
@@ -10,17 +15,17 @@ This project is an independent translation service. It does **not** run the Herm
 
 ## Architecture
 
-```text
-OpenAI SDK / Honcho text modules
-        |
-        | Bearer <bridge client token>
-        v
-127.0.0.1:8646  codex-openai-bridge
-        |  strict JSON/SSE boundaries
-        |  OpenAI <-> Responses translation
-        |  bounded credential helper subprocess
-        v
-Hermes Codex OAuth resolver -> fixed Codex Responses upstream
+```mermaid
+flowchart TD
+    consumers["OpenAI SDK / Honcho / verified consumers"]
+    bridge["127.0.0.1:8646<br/>codex-openai-bridge"]
+    resolver["Hermes Codex OAuth resolver"]
+    upstream["Fixed Codex Responses upstream"]
+
+    consumers -->|"Bearer bridge client token"| bridge
+    bridge -->|"Bounded credential helper subprocess"| resolver
+    resolver -. "validated credentials" .-> bridge
+    bridge -->|"Strict JSON/SSE boundaries<br/>OpenAI ↔ Responses translation"| upstream
 ```
 
 The public model name is always `codex`. The bridge reconstructs the upstream model, URL, authorization, account, `store:false`, streaming policy, and encrypted-reasoning include policy from trusted server-side state.
@@ -56,6 +61,24 @@ Compatibility follows the behavior of the real Codex backend, not every field pr
 OpenAI SDK release. Unknown fields, unproven enum values, stateful features, contradictory SSE
 snapshots, and malformed or expanded tool authority are rejected before they can become silent
 compatibility drift.
+
+```mermaid
+flowchart LR
+    request["Client request"]
+    auth["Bridge-token authentication"]
+    validation["Strict schema and bounds validation"]
+    policy["Server-owned policy projection"]
+    resolver["Bounded Hermes credential resolver"]
+    upstream["Codex Responses upstream"]
+    lifecycle["Response / SSE lifecycle validation"]
+    public["OpenAI-compatible public response"]
+    error["Sanitized error"]
+
+    request --> auth --> validation --> policy --> resolver --> upstream --> lifecycle --> public
+    auth -. "reject" .-> error
+    validation -. "reject" .-> error
+    lifecycle -. "reject" .-> error
+```
 
 The currently supported direct Responses request controls are:
 
@@ -249,6 +272,18 @@ Status meanings:
 - **Verified (constrained role)** — one practical CLI role is verified, not the full product.
 - **Component verified** — the provider/core component is verified, but the complete application UI
   or file-application workflow is not.
+
+```mermaid
+flowchart LR
+    consumer["Pinned real consumer"]
+    request["Consumer-emitted HTTP request"]
+    bridge["Loopback bridge<br/>strict parser + server-owned policy"]
+    fixture["Deterministic upstream fixture"]
+    native["Consumer-native response / tool handling"]
+    status["Scoped status and limitations"]
+
+    consumer --> request --> bridge --> fixture --> bridge --> native --> status
+```
 
 | Consumer / tool | Status | Known-good version | Verified scope | Not verified / required conditions |
 | --- | --- | --- | --- | --- |
