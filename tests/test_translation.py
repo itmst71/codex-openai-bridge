@@ -407,8 +407,8 @@ def test_reasoning_replay_precedes_assistant_text_and_parallel_calls_in_detail_o
     payload = chat_request_to_responses(request, upstream_model="upstream-model")
 
     assert payload["input"] == [
-        {"type": "reasoning", "encrypted_content": "YQ=="},
-        {"type": "reasoning", "encrypted_content": "Yg=="},
+        {"type": "reasoning", "summary": [], "encrypted_content": "YQ=="},
+        {"type": "reasoning", "summary": [], "encrypted_content": "Yg=="},
         {
             "role": "assistant",
             "content": [{"type": "output_text", "text": "Checking both."}],
@@ -446,7 +446,7 @@ def test_reasoning_only_null_content_gets_required_following_empty_assistant_mes
     payload = chat_request_to_responses(request, upstream_model="upstream-model")
 
     assert payload["input"] == [
-        {"type": "reasoning", "encrypted_content": "YQ=="},
+        {"type": "reasoning", "summary": [], "encrypted_content": "YQ=="},
         {"role": "assistant", "content": [{"type": "output_text", "text": ""}]},
     ]
 

@@ -181,6 +181,7 @@ async def test_honcho_assistant_reasoning_details_replay(tmp_path: Path) -> None
     replay = running.upstream.calls[1]["input"]
     assert replay[1] == {
         "type": "reasoning",
+        "summary": [],
         "encrypted_content": "Y29udHJhY3QtcmVhc29uaW5n",
     }
     assert replay[2] == {

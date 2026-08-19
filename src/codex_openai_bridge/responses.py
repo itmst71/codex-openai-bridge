@@ -469,7 +469,13 @@ def _parse_input(
                 raise _invalid_request()
             item_ids.add(item_id)
             reasoning_digests.add(digest)
-            translated.append({"type": "reasoning", "encrypted_content": item["encrypted_content"]})
+            translated.append(
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": part["type"], "text": part["text"]} for part in summary],
+                    "encrypted_content": item["encrypted_content"],
+                }
+            )
             continue
         if item_type == "compaction":
             if (

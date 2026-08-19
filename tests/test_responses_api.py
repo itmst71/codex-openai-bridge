@@ -1018,7 +1018,7 @@ def test_direct_responses_reasoning_accepts_strict_base64_variants(data: str) ->
                     "id": "rs_one",
                     "type": "reasoning",
                     "status": "completed",
-                    "summary": [],
+                    "summary": [{"type": "summary_text", "text": "safe summary"}],
                     "encrypted_content": data,
                 },
                 {
@@ -1033,7 +1033,11 @@ def test_direct_responses_reasoning_accepts_strict_base64_variants(data: str) ->
     )
 
     payload = responses_request_to_upstream(parsed, upstream_model="gpt-upstream")  # type: ignore[arg-type]
-    assert payload["input"][0] == {"type": "reasoning", "encrypted_content": data}
+    assert payload["input"][0] == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "safe summary"}],
+        "encrypted_content": data,
+    }
 
 
 def test_compaction_checkpoint_replay_is_exact_bounded_and_shares_digest_authority() -> None:
@@ -1392,7 +1396,7 @@ def test_reasoning_and_tool_history_ambiguity_or_bad_association_fails(items: ob
 
 
 @pytest.mark.asyncio
-async def test_two_request_output_history_round_trip_preserves_summary_but_replays_only_ciphertext(
+async def test_two_request_output_history_round_trip_replays_summary_and_ciphertext(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1497,10 +1501,15 @@ async def test_two_request_output_history_round_trip_preserves_summary_but_repla
     assert second_body["model"] == "codex"
     assert manager.calls == [False, False]
     # Responses IDs satisfy the SDK schema but carry no bridge authenticity and are stripped
-    # before replay. The canonical ciphertext is opaque and is forwarded without decryption.
+    # before replay. The validated summary and canonical ciphertext are forwarded without
+    # decryption or interpretation.
     assert upstream.calls[1][1]["input"] == [
         {"role": "user", "content": [{"type": "input_text", "text": "Weather?"}]},
-        {"type": "reasoning", "encrypted_content": "YQ=="},
+        {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "PRIVATE REASONING SUMMARY"}],
+            "encrypted_content": "YQ==",
+        },
         {
             "role": "assistant",
             "status": "completed",

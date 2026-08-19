@@ -1189,7 +1189,7 @@ async def test_two_call_encrypted_reasoning_round_trip_survives_sdk_and_replays_
     assert manager.calls == [False, False]
     assert upstream.calls[1][1]["input"] == [
         {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
-        {"type": "reasoning", "encrypted_content": "YQ=="},
+        {"type": "reasoning", "summary": [], "encrypted_content": "YQ=="},
         {
             "role": "assistant",
             "content": [{"type": "output_text", "text": "First answer"}],

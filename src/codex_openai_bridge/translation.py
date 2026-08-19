@@ -1430,7 +1430,13 @@ def chat_request_to_responses(
     translated_input: list[dict[str, Any]] = []
     for message in request.messages:
         for detail in message.reasoning_details:
-            translated_input.append({"type": "reasoning", "encrypted_content": detail.data})
+            translated_input.append(
+                {
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": detail.data,
+                }
+            )
         if message.role in {"user", "assistant"} and message.content is not None:
             translated_input.append(
                 {
