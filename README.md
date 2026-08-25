@@ -122,6 +122,12 @@ The currently supported direct Responses request controls are:
 - `store=false` and `include=["reasoning.encrypted_content"]`; both policies are also forced
   upstream by the server.
 
+Sequential function-tool rounds are supported when every pending call in the previous round has
+a matching output. A validated reasoning item or function call may begin the next function round;
+reasoning may begin the next function round only after all parallel outputs are complete. Duplicate
+IDs, repeated outputs, partial parallel rounds, and reasoning inserted while calls remain pending
+are rejected.
+
 Developer messages use the explicit content-part form. Assistant replay items accept the
 live-proven `completed`, `in_progress`, and `incomplete` status values and optional
 `commentary`/`final_answer` phase. Encrypted reasoning and compaction blobs are opaque replay
@@ -316,7 +322,7 @@ flowchart LR
 | --- | --- | --- | --- | --- |
 | OpenAI Python SDK | **Live verified** | 1.109.1 and 3.1.0 | Live Chat/Responses non-stream and stream plus offline structured output, function/custom-tool, usage, and compaction contracts | Use `max_retries=0`; this is not verification of unsupported OpenAI API surfaces or long-running application behavior |
 | Honcho | **Operationally verified** | Self-hosted request shape based on revision `444897975c95393b0d48024470ece03c025d3aa4` | Repeated derivation, summary/dream/dialectic generation, structured output, memory-search tool continuation, restart, queue, and existing PostgreSQL/Redis continuity | Embeddings require a separate backend; lossless nullable tool-call content currently requires the compatibility fix tracked in [plastic-labs/honcho#1061](https://github.com/plastic-labs/honcho/issues/1061) |
-| LangChain `ChatOpenAI` | **Operationally verified (scoped)** | `langchain-openai` 1.6.0, `langchain-core` 1.6.0, OpenAI SDK 3.3.1 | Live non-stream, synchronous stream, strict Pydantic output, one-tool Responses, sequential multi-tool Chat, three-turn history, and bounded failure recovery | Set `temperature=None`, `max_retries=0`, and select `use_responses_api`; asynchronous Responses streaming and sequential multi-tool Direct Responses are not verified |
+| LangChain `ChatOpenAI` | **Operationally verified (scoped)** | `langchain-openai` 1.6.0, `langchain-core` 1.6.0, OpenAI SDK 3.3.1 | Live non-stream, synchronous stream, strict Pydantic output, one-tool and sequential multi-tool Responses, sequential multi-tool Chat, three-turn history, and bounded failure recovery | Set `temperature=None`, `max_retries=0`, and select `use_responses_api`; asynchronous Responses streaming remains unverified |
 | OpenAI Agents SDK | **Live verified (configuration required)** | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | Live `OpenAIChatCompletionsModel` basic agent and local `function_tool` loop; offline stream contract | Disable tracing; `OpenAIResponsesModel`, sessions, and hosted tools are not verified |
 | AutoGen | **Contract verified (adapter required)** | `autogen-ext`/`autogen-core`/`autogen-agentchat` 0.7.5, OpenAI SDK 3.2.0 | Direct non-stream/stream and Pydantic JSON Schema; one `AssistantAgent` local function-tool/reflection contract | Requires explicit model metadata and the conditional parallel-tools adapter; live sustained use, teams, code execution, memory, and hosted agents are not verified |
 | Aider | **Contract verified (constrained role)** | `aider-chat` 0.86.2, LiteLLM 1.81.10, OpenAI SDK 2.20.0 | One-shot CLI `--message` contract performs a streaming `whole`-format edit of one existing file | Live sustained use, interactive mode, auto-commit, repo map, architect/weak-model flows, and other edit formats are not verified |

@@ -431,8 +431,7 @@ def _parse_input(
             # Direct Responses history has no Chat compatibility HMAC. These checks
             # establish a bounded canonical opaque blob, never provenance/authenticity.
             if (
-                output_phase
-                or visible_assistant_output
+                visible_assistant_output
                 or pending_call_ids
                 or set(item)
                 != {
@@ -444,6 +443,8 @@ def _parse_input(
                 }
             ):
                 raise _invalid_request()
+            if output_phase:
+                output_phase = False
             item_id = _identifier(item["id"])
             summary = item["summary"]
             if (
@@ -522,11 +523,13 @@ def _parse_input(
         if item_type == "function_call":
             if (
                 custom_tool is not None
-                or output_phase
+                or (output_phase and pending_call_ids)
                 or not {"type", "call_id", "name", "arguments"} <= set(item)
                 or not set(item) <= {"id", "type", "status", "call_id", "name", "arguments"}
             ):
                 raise _invalid_request()
+            if output_phase:
+                output_phase = False
             if "status" in item and item["status"] != "completed":
                 raise _invalid_request()
             if "id" in item:

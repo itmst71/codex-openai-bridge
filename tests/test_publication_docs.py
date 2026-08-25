@@ -61,8 +61,9 @@ def test_consumer_status_taxonomy_distinguishes_evidence_levels() -> None:
         "LangChain `ChatOpenAI` | **Operationally verified (scoped)**",
         "langchain-openai` 1.6.0",
         "OpenAI SDK 3.3.1",
-        "asynchronous Responses streaming",
-        "sequential multi-tool Direct Responses",
+        "one-tool and sequential multi-tool Responses",
+        "asynchronous Responses streaming remains unverified",
+        "reasoning may begin the next function round",
     ):
         assert required in english
 
@@ -76,8 +77,9 @@ def test_consumer_status_taxonomy_distinguishes_evidence_levels() -> None:
         "LangChain `ChatOpenAI` | **Operationally verified（範囲限定）**",
         "langchain-openai` 1.6.0",
         "OpenAI SDK 3.3.1",
-        "async Responses streaming",
-        "逐次複数tool Direct Responses",
+        "Responses 1-toolおよび逐次multi-tool",
+        "async Responses streamingは未検証",
+        "reasoningから次のfunction roundを開始できます",
     ):
         assert required in japanese
 

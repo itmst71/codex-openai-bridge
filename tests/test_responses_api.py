@@ -1395,6 +1395,150 @@ def test_reasoning_and_tool_history_ambiguity_or_bad_association_fails(items: ob
         _parse_request({"model": "codex", "input": items})
 
 
+def test_live_proven_sequential_function_rounds_are_forwarded_in_order() -> None:
+    document = {
+        "model": "codex",
+        "input": [
+            {"role": "user", "content": "Run both stages."},
+            {
+                "id": "rs_first",
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [],
+                "encrypted_content": "YQ==",
+            },
+            {
+                "id": "fc_first",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": "call_first",
+                "name": "first_probe",
+                "arguments": '{"value":"first"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_first",
+                "output": '{"accepted":true,"stage":1}',
+            },
+            {
+                "id": "rs_second",
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [{"type": "summary_text", "text": "Second stage"}],
+                "encrypted_content": "Yg==",
+            },
+            {
+                "id": "fc_second",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": "call_second",
+                "name": "second_probe",
+                "arguments": '{"value":"second"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_second",
+                "output": '{"accepted":true,"stage":2}',
+            },
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "name": name,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+            for name in ("first_probe", "second_probe")
+        ],
+        "parallel_tool_calls": False,
+    }
+
+    request = cast(Any, _parse_request(document))
+    payload = responses_request_to_upstream(request, upstream_model="private-model")
+
+    assert payload["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "Run both stages."}]},
+        {"type": "reasoning", "summary": [], "encrypted_content": "YQ=="},
+        {
+            "type": "function_call",
+            "call_id": "call_first",
+            "name": "first_probe",
+            "arguments": '{"value":"first"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_first",
+            "output": '{"accepted":true,"stage":1}',
+        },
+        {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "Second stage"}],
+            "encrypted_content": "Yg==",
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_second",
+            "name": "second_probe",
+            "arguments": '{"value":"second"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_second",
+            "output": '{"accepted":true,"stage":2}',
+        },
+    ]
+    assert request.historical_call_ids == frozenset({"call_first", "call_second"})
+
+
+@pytest.mark.parametrize(
+    "next_item",
+    [
+        {
+            "type": "function_call",
+            "call_id": "call_next_round",
+            "name": "allowed",
+            "arguments": "{}",
+        },
+        {
+            "id": "rs_next_round",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [],
+            "encrypted_content": "YQ==",
+        },
+    ],
+)
+def test_next_model_round_waits_for_every_parallel_output(next_item: dict[str, Any]) -> None:
+    items = [
+        {
+            "type": "function_call",
+            "call_id": "call_parallel_one",
+            "name": "allowed",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_parallel_two",
+            "name": "allowed",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_parallel_one",
+            "output": "done",
+        },
+        next_item,
+    ]
+
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        _parse_request({"model": "codex", "input": items})
+
+
 @pytest.mark.asyncio
 async def test_two_request_output_history_round_trip_replays_summary_and_ciphertext(
     tmp_path: Path,

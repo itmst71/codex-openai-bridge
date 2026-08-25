@@ -113,6 +113,11 @@ flowchart LR
 - 正の値に制限した threshold を持つ `context_management=[{"type":"compaction","compact_threshold":N}]`。その組み合わせは backend に対して未検証であるため、compaction と function tools または custom tools は併用できません。
 - `store=false` および `include=["reasoning.encrypted_content"]`。どちらの policy もサーバーが upstream で強制します。
 
+逐次function-tool roundは、前roundのすべてのpending callに対応するoutputがある場合に対応します。
+検証済みのreasoningまたはfunction callから次のroundを開始でき、reasoningから次のfunction roundを開始できますが、
+すべてのparallel outputが完了した後に限ります。重複ID、繰り返しoutput、未完了のparallel round、
+pending callが残る間のreasoning挿入は拒否します。
+
 Developer messages は明示的な content-part form を使用します。Assistant replay items では、実環境で検証済みの `completed`、`in_progress`、`incomplete` status values と、任意の `commentary`/`final_answer` phase を受理します。Encrypted reasoning と compaction blobs は opaque replay authority として扱われます。ブリッジは内容をログに記録したり復号したりせず、bounds、ordering、identity、duplication を検証します。
 
 検証済みの reasoning summaries は、クライアントが `reasoning.summary` を明示的に要求した場合に限って公開されます。要求されていない nonempty upstream summary は拒否されます。確認済みの assistant `phase` は、SDK 3.1.0 では typed field として、SDK 1.109.1 では `model_extra` を介して保持されます。
@@ -285,7 +290,7 @@ flowchart LR
 | --- | --- | --- | --- | --- |
 | OpenAI Python SDK | **Live verified（live検証済み）** | 1.109.1 and 3.1.0 | live Chat/Responses non-stream/streamと、offline structured output、function/custom-tool、usage、compaction contract | `max_retries=0`を使用。非対応OpenAI API surfaceや長時間application挙動の検証ではない |
 | Honcho | **Operationally verified（実運用検証済み）** | revision `444897975c95393b0d48024470ece03c025d3aa4`を基にしたself-hosted request shape | 反復derivation、summary/dream/dialectic生成、structured output、memory-search tool continuation、再起動、queue、既存PostgreSQL/Redis continuity | Embeddingsは別backendが必要。losslessなnullable tool-call contentは現在[plastic-labs/honcho#1061](https://github.com/plastic-labs/honcho/issues/1061)のcompatibility fixが必要 |
-| LangChain `ChatOpenAI` | **Operationally verified（範囲限定）** | `langchain-openai` 1.6.0, `langchain-core` 1.6.0, OpenAI SDK 3.3.1 | live non-stream、同期stream、strict Pydantic、Responses 1-tool、Chat逐次multi-tool、3-turn history、bounded failure recovery | `temperature=None`、`max_retries=0`、`use_responses_api`選択が必要。async Responses streamingと逐次複数tool Direct Responsesは未検証 |
+| LangChain `ChatOpenAI` | **Operationally verified（範囲限定）** | `langchain-openai` 1.6.0, `langchain-core` 1.6.0, OpenAI SDK 3.3.1 | live non-stream、同期stream、strict Pydantic、Responses 1-toolおよび逐次multi-tool、Chat逐次multi-tool、3-turn history、bounded failure recovery | `temperature=None`、`max_retries=0`、`use_responses_api`選択が必要。async Responses streamingは未検証 |
 | OpenAI Agents SDK | **Live verified（設定が必要）** | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | live `OpenAIChatCompletionsModel` basic agentとlocal `function_tool` loop。offline stream contract | tracingを無効化。`OpenAIResponsesModel`、sessions、hosted toolsは未検証 |
 | AutoGen | **Contract verified（adapterが必要）** | `autogen-ext`/`autogen-core`/`autogen-agentchat` 0.7.5, OpenAI SDK 3.2.0 | Direct non-stream/stream、Pydantic JSON Schema、`AssistantAgent` local function-tool/reflection contract | explicit model metadataとconditional parallel-tools adapterが必要。live継続利用、teams、code execution、memory、hosted agentsは未検証 |
 | Aider | **Contract verified（役割限定）** | `aider-chat` 0.86.2, LiteLLM 1.81.10, OpenAI SDK 2.20.0 | One-shot CLI `--message` contractで既存file 1個をstreaming `whole`-format編集 | live継続利用、interactive mode、auto-commit、repo map、architect/weak-model flows、その他edit formatsは未検証 |
