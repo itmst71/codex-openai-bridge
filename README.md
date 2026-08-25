@@ -13,6 +13,30 @@ A bounded, loopback-only OpenAI-compatible HTTP bridge for the Codex Responses b
 
 This project is an independent translation service. It does **not** run the Hermes agent loop, system prompt, memory, or tools.
 
+## Intended use and service terms
+
+This repository is intended for personal, single-user, local experimentation. It publishes
+source code for a bounded compatibility adapter; it does not turn ChatGPT/Codex subscription
+usage into a supported general-purpose API service.
+
+- Do not share the bridge client token or make your account available to another user.
+- Do not pool ChatGPT/Codex accounts or distribute per-user credentials or quotas.
+- Do not redistribute, meter, or resell subscription-backed access.
+- Do not use this bridge as a team, hosted, public, commercial, or CI inference service.
+- For shared services or production automation, use the official OpenAI API and credentials whose
+  terms permit that backend use.
+
+OpenAI has stated that converting subscription usage into API traffic for re-serving or sharing
+across users is unsupported and may be flagged by fraud-prevention systems. This project is not affiliated with, endorsed by, or supported by OpenAI. Technical verification in this repository
+does not establish permission for a particular deployment; users remain responsible for the
+applicable product terms.
+
+The MIT license applies only to this project's source code. It does not grant rights to access or redistribute OpenAI services.
+
+Policy references: [Codex usage clarification](https://x.com/thsottiaux/status/2090675027670978569),
+[OpenAI Terms of Use](https://openai.com/policies/row-terms-of-use/), and
+[OpenAI Account Sharing Policy](https://help.openai.com/en/articles/10471989-openai-account-sharing-policy).
+
 ## Architecture
 
 ```mermaid
@@ -266,37 +290,38 @@ loopback route, strict parser, upstream projection, and consumer-native response
 
 Status meanings:
 
-- **Verified** — the pinned real consumer completed the listed end-to-end contract.
-- **Verified (configuration required)** — the listed contract is verified only with the documented
-  settings; unlisted defaults and product surfaces are not implied.
-- **Verified (adapter required)** — a small documented consumer-side adapter is part of the verified
-  contract; the bridge itself is not relaxed.
-- **Verified (constrained role)** — one practical CLI role is verified, not the full product.
-- **Component verified** — the provider/core component is verified, but the complete application UI
-  or file-application workflow is not.
+- **Contract verified** — the pinned real package's serializer/parser completed the listed contract
+  against a deterministic upstream fixture. This proves an exact wire shape, not live provider use.
+- **Live verified** — the pinned real package completed a representative operation through the
+  running bridge and real Codex backend.
+- **Operationally verified** — a practical application was used repeatedly with real data or source,
+  including the documented multi-turn/tool and failure-recovery boundaries.
+- **Unsupported / external provider required** — the Codex backend cannot supply the capability, or
+  the bridge intentionally leaves it to a separate authority such as an embedding provider.
+
+Qualifiers such as `configuration required`, `adapter required`, `scoped`, `constrained role`, and
+`component only` narrow those evidence levels. A fixture or serializer compatibility alone is not an operational support claim, and no row implies support for an unlisted product surface.
 
 ```mermaid
 flowchart LR
-    consumer["Pinned real consumer"]
-    request["Consumer-emitted HTTP request"]
-    bridge["Loopback bridge<br/>strict parser + server-owned policy"]
-    fixture["Deterministic upstream fixture"]
-    native["Consumer-native response / tool handling"]
-    status["Scoped status and limitations"]
+    contract["Contract verified<br/>real package + deterministic fixture"]
+    live["Live verified<br/>real package + bridge + Codex"]
+    operational["Operationally verified<br/>practical repeated use + failures"]
+    scoped["Exact scope, versions, and limitations"]
 
-    consumer --> request --> bridge --> fixture --> bridge --> native --> status
+    contract --> live --> operational --> scoped
 ```
 
 | Consumer / tool | Status | Known-good version | Verified scope | Not verified / required conditions |
 | --- | --- | --- | --- | --- |
-| OpenAI Python SDK | **Verified** | 1.109.1 and 3.1.0 | Chat/Responses non-stream and stream, structured output, function/custom tools, usage; native compaction on 3.1.0 | Use `max_retries=0`; unsupported OpenAI API surfaces remain rejected |
-| Honcho | **Verified** | Request shapes from revision `444897975c95393b0d48024470ece03c025d3aa4` | Text generation, structured derivation, tool loop | Embeddings require a separate backend |
-| LangChain `ChatOpenAI` | **Verified (configuration required)** | `langchain-openai` 1.5.1, `langchain-core` 1.5.6, OpenAI SDK 3.2.0 | Responses non-stream/stream and Pydantic JSON Schema; Responses and Chat Completions function-tool result round-trip | Set `temperature=None`, `max_retries=0`, and choose `use_responses_api` explicitly; tool descriptions must be nonempty |
-| OpenAI Agents SDK | **Verified (configuration required)** | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | `OpenAIChatCompletionsModel` text, stream, and local `function_tool` loop | Disable tracing; `OpenAIResponsesModel`, sessions, and hosted tools are not verified |
-| AutoGen | **Verified (adapter required)** | `autogen-ext`/`autogen-core`/`autogen-agentchat` 0.7.5, OpenAI SDK 3.2.0 | Direct non-stream/stream and Pydantic JSON Schema; one `AssistantAgent` local function-tool/reflection loop | Requires explicit model metadata and the conditional parallel-tools adapter; teams, code execution, memory, and hosted agents are not verified |
-| Aider | **Verified (constrained role)** | `aider-chat` 0.86.2, LiteLLM 1.81.10, OpenAI SDK 2.20.0 | One-shot CLI `--message` performs a streaming `whole`-format edit of one existing file | Requires the documented model settings; interactive mode, auto-commit, repo map, architect/weak-model flows, and other edit formats are not verified |
-| Cline CLI | **Verified (constrained role)** | Linux x64 binary 3.0.55 | One-shot headless `read_files` → `editor` → `submit_and_exit` loop edits one existing file | Requires the documented local-only flags and short system prompt; other platforms, default prompt/control plane, shell/web/MCP/subagents/teams, IDE/TUI, and non-idempotent tools are not verified |
-| Continue core OpenAI provider | **Component verified** | `@continuedev/core` 1.1.0, `tsx` 4.23.12 | Public `streamChat`, Edit-role `streamComplete`, and non-stream function-tool result round-trip | Chat/Edit generation only; Apply/file mutation, current `cn` CLI, autocomplete, embeddings, and IDE UI are not verified |
+| OpenAI Python SDK | **Live verified** | 1.109.1 and 3.1.0 | Live Chat/Responses non-stream and stream plus offline structured output, function/custom-tool, usage, and compaction contracts | Use `max_retries=0`; this is not verification of unsupported OpenAI API surfaces or long-running application behavior |
+| Honcho | **Operationally verified** | Self-hosted request shape based on revision `444897975c95393b0d48024470ece03c025d3aa4` | Repeated derivation, summary/dream/dialectic generation, structured output, memory-search tool continuation, restart, queue, and existing PostgreSQL/Redis continuity | Embeddings require a separate backend; lossless nullable tool-call content currently requires the compatibility fix tracked in [plastic-labs/honcho#1061](https://github.com/plastic-labs/honcho/issues/1061) |
+| LangChain `ChatOpenAI` | **Operationally verified (scoped)** | `langchain-openai` 1.6.0, `langchain-core` 1.6.0, OpenAI SDK 3.3.1 | Live non-stream, synchronous stream, strict Pydantic output, one-tool Responses, sequential multi-tool Chat, three-turn history, and bounded failure recovery | Set `temperature=None`, `max_retries=0`, and select `use_responses_api`; asynchronous Responses streaming and sequential multi-tool Direct Responses are not verified |
+| OpenAI Agents SDK | **Live verified (configuration required)** | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | Live `OpenAIChatCompletionsModel` basic agent and local `function_tool` loop; offline stream contract | Disable tracing; `OpenAIResponsesModel`, sessions, and hosted tools are not verified |
+| AutoGen | **Contract verified (adapter required)** | `autogen-ext`/`autogen-core`/`autogen-agentchat` 0.7.5, OpenAI SDK 3.2.0 | Direct non-stream/stream and Pydantic JSON Schema; one `AssistantAgent` local function-tool/reflection contract | Requires explicit model metadata and the conditional parallel-tools adapter; live sustained use, teams, code execution, memory, and hosted agents are not verified |
+| Aider | **Contract verified (constrained role)** | `aider-chat` 0.86.2, LiteLLM 1.81.10, OpenAI SDK 2.20.0 | One-shot CLI `--message` contract performs a streaming `whole`-format edit of one existing file | Live sustained use, interactive mode, auto-commit, repo map, architect/weak-model flows, and other edit formats are not verified |
+| Cline CLI | **Live verified (constrained role)** | Linux x64 binary 3.0.55 | One live headless `read_files` → `editor` → `submit_and_exit` edit of one existing file | Requires the documented local-only flags and short system prompt; sustained use, other platforms, default control plane, shell/web/MCP/subagents/teams, IDE/TUI, and non-idempotent tools are not verified |
+| Continue core OpenAI provider | **Contract verified (component only)** | `@continuedev/core` 1.1.0, `tsx` 4.23.12 | Public `streamChat`, Edit-role `streamComplete`, and non-stream function-tool result contract | Chat/Edit component only; live sustained use, Apply/file mutation, current `cn` CLI, autocomplete, embeddings, and IDE UI are not verified |
 
 These framework packages are isolated CI contract dependencies, not bridge runtime dependencies.
 Their tests use synthetic credentials and deterministic upstream fixtures, so normal project tests

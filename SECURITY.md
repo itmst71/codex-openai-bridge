@@ -5,6 +5,17 @@
 Security fixes are applied to the latest revision on the `main` branch. This project is
 currently pre-1.0; older revisions are not maintained separately.
 
+## Scope and non-goals
+
+The supported deployment boundary is personal, single-user, loopback-only use with one
+owner-controlled bridge token and one owner-controlled Codex account. The security model does
+not include multi-user credential distribution, account pooling, billing or resale, or a public hosted deployment. Do not use the bridge to make subscription-backed access available to other
+users.
+
+The bridge translates a bounded protocol subset; it is not a secret manager, tenant gateway,
+hosted inference service, or OpenAI Developer API replacement. Shared services and production
+automation should use the official OpenAI API with credentials and terms suitable for that use.
+
 ## Reporting a vulnerability
 
 Use GitHub's private vulnerability-reporting form for this repository when it is available.

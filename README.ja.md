@@ -12,6 +12,29 @@ Codex Responses backend のための、処理範囲を制限した loopback 専�
 
 このプロジェクトは独立した変換サービスです。Hermes の agent loop、system prompt、memory、tools は実行**しません**。
 
+## 想定用途とサービス利用条件
+
+このrepositoryは、個人・単一ユーザー・ローカルでの実験用途を想定しています。処理範囲を
+制限した互換adapterのsource codeを公開するものであり、ChatGPT/Codex subscriptionを
+一般用途向けのsupport済みAPI serviceへ変換するものではありません。
+
+- ブリッジ client token を共有しないでください。また、自分のaccountを他のユーザーが利用できる状態にしないでください。
+- ChatGPT/Codex account をpoolしないでください。ユーザー別credentialやquotaを配布しないでください。
+- subscription由来のaccessを再配布、計測販売、再販しないでください。
+- team、hosted、public、commercial、CI inference serviceとして使用しないでください。
+- 共有serviceやproduction automationには、そのbackend利用がtermsで許可されたcredentialとOpenAI公式APIを使用してください。
+
+OpenAIは、subscription利用をAPI trafficへ変換して複数ユーザーへ再提供・共有することは
+非supportであり、fraud-prevention systemのflag対象になり得ると説明しています。このprojectはOpenAIとは提携しておらず、承認・推奨・サポートも受けていません。このrepositoryにおける
+技術検証は、特定deploymentの利用許可を示すものではありません。適用されるproduct termsの
+確認は利用者の責任です。
+
+MIT licenseはこのprojectのsource codeだけに適用されます。OpenAI serviceへアクセスまたは再配布する権利を付与しません。
+
+Policy参照先: [Codex利用に関する説明](https://x.com/thsottiaux/status/2090675027670978569)、
+[OpenAI Terms of Use](https://openai.com/policies/row-terms-of-use/)、
+[OpenAI Account Sharing Policy](https://help.openai.com/en/articles/10471989-openai-account-sharing-policy)。
+
 ## アーキテクチャ
 
 ```mermaid
@@ -236,34 +259,38 @@ Provider の機能とコンシューマー互換性は別々の契約です。�
 
 対応状況の意味は次のとおりです。
 
-- **検証済み** — 固定した実際のコンシューマーが、記載の end-to-end contract を完了しています。
-- **検証済み（設定が必要）** — 記載の contract は、文書化された settings でのみ検証済みです。記載のない defaults や product surfaces まで対応することを意味しません。
-- **検証済み（adapter が必要）** — 文書化された小規模なコンシューマー側 adapter が、検証済み contract に含まれます。ブリッジ自体の制約は緩和しません。
-- **検証済み（役割を限定）** — 実用的な CLI role の 1 つのみを検証しており、product 全体を検証したものではありません。
-- **component 検証済み** — provider/core component は検証済みですが、application UI 全体または file-application workflow は未検証です。
+- **Contract verified（contract検証済み）** — 固定した実packageのserializer/parserが、決定的な
+  upstream fixtureに対して記載のcontractを完了しています。正確なwire shapeの証明であり、live provider利用の証明ではありません。
+- **Live verified（live検証済み）** — 固定した実packageが、稼働中bridgeと実Codex backendを通して代表操作を完了しています。
+- **Operationally verified（実運用検証済み）** — 実用applicationを実dataまたは実sourceで繰り返し使用し、
+  記載のmulti-turn/toolおよびfailure-recovery境界まで確認しています。
+- **Unsupported / external provider required（非対応／外部provider必須）** — Codex backendが能力を
+  提供できないか、embedding providerなど別authorityへ意図的に分離しています。
+
+`設定が必要`、`adapterが必要`、`範囲限定`、`役割限定`、`componentのみ`などの注記は証拠範囲を
+さらに限定します。fixtureまたはserializer互換性だけでは実運用supportを意味しません。また、
+どの行も記載されていないproduct surfaceのsupportを意味しません。
 
 ```mermaid
 flowchart LR
-    consumer["固定した実際のコンシューマー"]
-    request["コンシューマーが送信する HTTP request"]
-    bridge["Loopback bridge<br/>厳格な parser + サーバー管理 policy"]
-    fixture["決定的な upstream fixture"]
-    native["コンシューマー固有の response / tool handling"]
-    status["範囲を限定した status と limitations"]
+    contract["Contract verified<br/>実package + 決定的fixture"]
+    live["Live verified<br/>実package + bridge + Codex"]
+    operational["Operationally verified<br/>反復実用 + failure確認"]
+    scoped["正確な範囲・version・制限"]
 
-    consumer --> request --> bridge --> fixture --> bridge --> native --> status
+    contract --> live --> operational --> scoped
 ```
 
 | コンシューマー / tool | 対応状況 | 動作確認済み version | 検証済みの範囲 | 未検証事項 / 必要条件 |
 | --- | --- | --- | --- | --- |
-| OpenAI Python SDK | **検証済み** | 1.109.1 and 3.1.0 | Chat/Responses non-stream and stream、structured output、function/custom tools、usage。3.1.0 では native compaction | `max_retries=0` を使用。非対応の OpenAI API surfaces は引き続き拒否される |
-| Honcho | **検証済み** | Request shapes from revision `444897975c95393b0d48024470ece03c025d3aa4` | Text generation、structured derivation、tool loop | Embeddings には別の backend が必要 |
-| LangChain `ChatOpenAI` | **検証済み（設定が必要）** | `langchain-openai` 1.5.1, `langchain-core` 1.5.6, OpenAI SDK 3.2.0 | Responses non-stream/stream と Pydantic JSON Schema。Responses と Chat Completions の function-tool result round-trip | `temperature=None`、`max_retries=0` を設定し、`use_responses_api` を明示的に選択する。tool descriptions は nonempty でなければならない |
-| OpenAI Agents SDK | **検証済み（設定が必要）** | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | `OpenAIChatCompletionsModel` の text、stream、local `function_tool` loop | tracing を無効化する。`OpenAIResponsesModel`、sessions、hosted tools は未検証 |
-| AutoGen | **検証済み（adapter が必要）** | `autogen-ext`/`autogen-core`/`autogen-agentchat` 0.7.5, OpenAI SDK 3.2.0 | Direct non-stream/stream と Pydantic JSON Schema。`AssistantAgent` による local function-tool/reflection loop 1 回 | explicit model metadata と conditional parallel-tools adapter が必要。teams、code execution、memory、hosted agents は未検証 |
-| Aider | **検証済み（役割を限定）** | `aider-chat` 0.86.2, LiteLLM 1.81.10, OpenAI SDK 2.20.0 | One-shot CLI `--message` により、既存 file 1 個を streaming `whole`-format で編集 | 文書化された model settings が必要。interactive mode、auto-commit、repo map、architect/weak-model flows、その他の edit formats は未検証 |
-| Cline CLI | **検証済み（役割を限定）** | Linux x64 binary 3.0.55 | One-shot headless `read_files` → `editor` → `submit_and_exit` loop で既存 file 1 個を編集 | 文書化された local-only flags と短い system prompt が必要。その他の platforms、default prompt/control plane、shell/web/MCP/subagents/teams、IDE/TUI、non-idempotent tools は未検証 |
-| Continue core OpenAI provider | **component 検証済み** | `@continuedev/core` 1.1.0, `tsx` 4.23.12 | 公開 `streamChat`、Edit-role `streamComplete`、non-stream function-tool result round-trip | Chat/Edit generation のみ。Apply/file mutation、現在の `cn` CLI、autocomplete、embeddings、IDE UI は未検証 |
+| OpenAI Python SDK | **Live verified（live検証済み）** | 1.109.1 and 3.1.0 | live Chat/Responses non-stream/streamと、offline structured output、function/custom-tool、usage、compaction contract | `max_retries=0`を使用。非対応OpenAI API surfaceや長時間application挙動の検証ではない |
+| Honcho | **Operationally verified（実運用検証済み）** | revision `444897975c95393b0d48024470ece03c025d3aa4`を基にしたself-hosted request shape | 反復derivation、summary/dream/dialectic生成、structured output、memory-search tool continuation、再起動、queue、既存PostgreSQL/Redis continuity | Embeddingsは別backendが必要。losslessなnullable tool-call contentは現在[plastic-labs/honcho#1061](https://github.com/plastic-labs/honcho/issues/1061)のcompatibility fixが必要 |
+| LangChain `ChatOpenAI` | **Operationally verified（範囲限定）** | `langchain-openai` 1.6.0, `langchain-core` 1.6.0, OpenAI SDK 3.3.1 | live non-stream、同期stream、strict Pydantic、Responses 1-tool、Chat逐次multi-tool、3-turn history、bounded failure recovery | `temperature=None`、`max_retries=0`、`use_responses_api`選択が必要。async Responses streamingと逐次複数tool Direct Responsesは未検証 |
+| OpenAI Agents SDK | **Live verified（設定が必要）** | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | live `OpenAIChatCompletionsModel` basic agentとlocal `function_tool` loop。offline stream contract | tracingを無効化。`OpenAIResponsesModel`、sessions、hosted toolsは未検証 |
+| AutoGen | **Contract verified（adapterが必要）** | `autogen-ext`/`autogen-core`/`autogen-agentchat` 0.7.5, OpenAI SDK 3.2.0 | Direct non-stream/stream、Pydantic JSON Schema、`AssistantAgent` local function-tool/reflection contract | explicit model metadataとconditional parallel-tools adapterが必要。live継続利用、teams、code execution、memory、hosted agentsは未検証 |
+| Aider | **Contract verified（役割限定）** | `aider-chat` 0.86.2, LiteLLM 1.81.10, OpenAI SDK 2.20.0 | One-shot CLI `--message` contractで既存file 1個をstreaming `whole`-format編集 | live継続利用、interactive mode、auto-commit、repo map、architect/weak-model flows、その他edit formatsは未検証 |
+| Cline CLI | **Live verified（役割限定）** | Linux x64 binary 3.0.55 | 実Codexでone-shot headless `read_files` → `editor` → `submit_and_exit`編集 | local-only flagsと短いsystem promptが必要。継続利用、他platform、default control plane、shell/web/MCP/subagents/teams、IDE/TUI、non-idempotent toolsは未検証 |
+| Continue core OpenAI provider | **Contract verified（componentのみ）** | `@continuedev/core` 1.1.0, `tsx` 4.23.12 | 公開`streamChat`、Edit-role `streamComplete`、non-stream function-tool result contract | Chat/Edit componentのみ。live継続利用、Apply/file mutation、現行`cn` CLI、autocomplete、embeddings、IDE UIは未検証 |
 
 これらの framework packages は、分離された CI contract dependencies であり、ブリッジの runtime dependencies ではありません。テストでは synthetic credentials と deterministic upstream fixtures を使用するため、通常の project tests と production deployment が frameworks の external services をインストールしたり、接続したりすることはありません。
 
