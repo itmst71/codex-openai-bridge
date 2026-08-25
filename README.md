@@ -236,12 +236,14 @@ model = "codex"
 [deriver.model_config.overrides]
 base_url = "http://127.0.0.1:8646/v1"
 api_key_env = "CODEX_BRIDGE_CLIENT_TOKEN"
-
-[deriver.model_config.overrides.provider_params]
-structured_output_mode = "json_object"
 ```
 
-Use a separate OpenAI-compatible embedding backend with its own base URL and `api_key_env`. For an initial bridge-only experiment where missing embeddings are acceptable, explicitly set:
+Keep Honcho's default native `json_schema` structured-output mode for the Codex bridge. Do not set
+`structured_output_mode = "json_object"`: bounded live probes consistently returned an upstream 502
+for `json_object`, while the same derivation completed successfully with native `json_schema`.
+
+Use a separate OpenAI-compatible embedding backend with its own base URL and `api_key_env`. For an
+initial bridge-only experiment where missing embeddings are acceptable, explicitly set:
 
 ```bash
 EMBED_MESSAGES=false

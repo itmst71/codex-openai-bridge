@@ -213,10 +213,12 @@ model = "codex"
 [deriver.model_config.overrides]
 base_url = "http://127.0.0.1:8646/v1"
 api_key_env = "CODEX_BRIDGE_CLIENT_TOKEN"
-
-[deriver.model_config.overrides.provider_params]
-structured_output_mode = "json_object"
 ```
+
+Codexブリッジでは、Honcho既定のnative `json_schema` structured-output modeを維持してください。
+`structured_output_mode = "json_object"`は設定しないでください。制限付きのlive probeでは
+`json_object`が一貫してupstream 502を返した一方、同じderivationはnative `json_schema`で
+正常に完了しました。
 
 独自の base URL と `api_key_env` を持つ、別の OpenAI-compatible embedding backend を使用してください。embeddings がなくてもよいブリッジのみの初期実験では、次を明示的に設定します。
 
