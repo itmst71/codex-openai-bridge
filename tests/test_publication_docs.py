@@ -1,6 +1,7 @@
 # ruff: noqa: RUF001
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,7 +63,27 @@ def test_consumer_status_taxonomy_distinguishes_evidence_levels() -> None:
         "langchain-openai` 1.6.0",
         "OpenAI SDK 3.3.1",
         "one-tool and sequential multi-tool Responses",
-        "asynchronous Responses streaming remains unverified",
+        "asynchronous Responses streaming with the official aiohttp transport",
+        "bounded `batch()`/`abatch()` concurrency",
+        "bounded `batch()`/`abatch()` concurrency (4 inputs, maximum 2)",
+        "one injected 429 and one mid-stream disconnect",
+        "recovery after one injected 429 and one mid-stream disconnect",
+        "openai[aiohttp]",
+        "one-shot batch/concurrency evidence; repeated batch/concurrency runs remain unverified",
+        "repeated exhaustion/interruption remains unverified",
+        "daemon-mode use remains unverified",
+        "sync_http_client = DefaultHttpxClient(trust_env=False)",
+        "async_http_client = DefaultAioHttpClient(trust_env=False)",
+        "http_socket_options=()",
+        "http_client=sync_http_client",
+        "http_async_client=async_http_client",
+        "await llm.root_async_client.close()",
+        "llm.root_client.close()",
+        "async def main() -> None:",
+        "asyncio.run(main())",
+        "object=response",
+        "status=completed",
+        "chunk_position=last",
         "reasoning may begin the next function round",
     ):
         assert required in english
@@ -78,7 +99,27 @@ def test_consumer_status_taxonomy_distinguishes_evidence_levels() -> None:
         "langchain-openai` 1.6.0",
         "OpenAI SDK 3.3.1",
         "Responses 1-toolおよび逐次multi-tool",
-        "async Responses streamingは未検証",
+        "公式aiohttp transportによるasync Responses streaming",
+        "bounded `batch()`/`abatch()` concurrency",
+        "bounded `batch()`/`abatch()` concurrency（4入力・最大2）",
+        "注入した429 1回とstream途中切断1回",
+        "注入した429 1回とstream途中切断1回からの回復",
+        "openai[aiohttp]",
+        "batch/concurrency evidenceはone-shotであり、反復batch/concurrency runは未検証",
+        "反復exhaustion／interruptionは未検証",
+        "daemon-mode利用は未検証",
+        "sync_http_client = DefaultHttpxClient(trust_env=False)",
+        "async_http_client = DefaultAioHttpClient(trust_env=False)",
+        "http_socket_options=()",
+        "http_client=sync_http_client",
+        "http_async_client=async_http_client",
+        "await llm.root_async_client.close()",
+        "llm.root_client.close()",
+        "async def main() -> None:",
+        "asyncio.run(main())",
+        "object=response",
+        "status=completed",
+        "chunk_position=last",
         "reasoningから次のfunction roundを開始できます",
     ):
         assert required in japanese
@@ -98,6 +139,18 @@ def test_security_policy_matches_personal_loopback_publication_scope() -> None:
         "Do not include exploit details, credentials, access tokens, account IDs",
     ):
         assert required in security
+
+
+def test_bilingual_langchain_python_examples_are_syntactically_valid() -> None:
+    for path in (README, README_JA):
+        section = path.read_text(encoding="utf-8").split("### LangChain", 1)[1]
+        code = section.split("```python\n", 1)[1].split("\n```", 1)[0]
+        tree = ast.parse(code, filename=str(path))
+        try_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Try)]
+        assert len(try_nodes) == 1
+        finalbody = "\n".join(ast.unparse(node) for node in try_nodes[0].finalbody)
+        assert "await llm.root_async_client.close()" in finalbody
+        assert "llm.root_client.close()" in finalbody
 
 
 def test_mit_license_notice_does_not_claim_service_rights() -> None:

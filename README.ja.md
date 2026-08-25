@@ -290,32 +290,59 @@ flowchart LR
 | --- | --- | --- | --- | --- |
 | OpenAI Python SDK | **Live verified（live検証済み）** | 1.109.1 and 3.1.0 | live Chat/Responses non-stream/streamと、offline structured output、function/custom-tool、usage、compaction contract | `max_retries=0`を使用。非対応OpenAI API surfaceや長時間application挙動の検証ではない |
 | Honcho | **Operationally verified（実運用検証済み）** | revision `444897975c95393b0d48024470ece03c025d3aa4`を基にしたself-hosted request shape | 反復derivation、summary/dream/dialectic生成、structured output、memory-search tool continuation、再起動、queue、既存PostgreSQL/Redis continuity | Embeddingsは別backendが必要。losslessなnullable tool-call contentは現在[plastic-labs/honcho#1061](https://github.com/plastic-labs/honcho/issues/1061)のcompatibility fixが必要 |
-| LangChain `ChatOpenAI` | **Operationally verified（範囲限定）** | `langchain-openai` 1.6.0, `langchain-core` 1.6.0, OpenAI SDK 3.3.1 | live non-stream、同期stream、strict Pydantic、Responses 1-toolおよび逐次multi-tool、Chat逐次multi-tool、3-turn history、bounded failure recovery | `temperature=None`、`max_retries=0`、`use_responses_api`選択が必要。async Responses streamingは未検証 |
+| LangChain `ChatOpenAI` | **Operationally verified（範囲限定）** | `langchain-openai` 1.6.0, `langchain-core` 1.6.0, OpenAI SDK 3.3.1 | live non-stream、同期stream、公式aiohttp transportによるasync Responses streaming、strict Pydantic、Responses 1-toolおよび逐次multi-tool、Chat逐次multi-tool、3-turn history、bounded `batch()`/`abatch()` concurrency（4入力・最大2）、注入した429 1回とstream途中切断1回からの回復 | `temperature=None`、`max_retries=0`、`use_responses_api`選択、`openai[aiohttp]`、`trust_env=False`の明示的sync/async client、`http_socket_options=()`、typed completed terminal確認が必要。daemon長期利用、2を超える並列、反復exhaustion／interruptionは未検証 |
 | OpenAI Agents SDK | **Live verified（設定が必要）** | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | live `OpenAIChatCompletionsModel` basic agentとlocal `function_tool` loop。offline stream contract | tracingを無効化。`OpenAIResponsesModel`、sessions、hosted toolsは未検証 |
 | AutoGen | **Contract verified（adapterが必要）** | `autogen-ext`/`autogen-core`/`autogen-agentchat` 0.7.5, OpenAI SDK 3.2.0 | Direct non-stream/stream、Pydantic JSON Schema、`AssistantAgent` local function-tool/reflection contract | explicit model metadataとconditional parallel-tools adapterが必要。live継続利用、teams、code execution、memory、hosted agentsは未検証 |
 | Aider | **Contract verified（役割限定）** | `aider-chat` 0.86.2, LiteLLM 1.81.10, OpenAI SDK 2.20.0 | One-shot CLI `--message` contractで既存file 1個をstreaming `whole`-format編集 | live継続利用、interactive mode、auto-commit、repo map、architect/weak-model flows、その他edit formatsは未検証 |
 | Cline CLI | **Live verified（役割限定）** | Linux x64 binary 3.0.55 | 実Codexでone-shot headless `read_files` → `editor` → `submit_and_exit`編集 | local-only flagsと短いsystem promptが必要。継続利用、他platform、default control plane、shell/web/MCP/subagents/teams、IDE/TUI、non-idempotent toolsは未検証 |
 | Continue core OpenAI provider | **Contract verified（componentのみ）** | `@continuedev/core` 1.1.0, `tsx` 4.23.12 | 公開`streamChat`、Edit-role `streamComplete`、non-stream function-tool result contract | Chat/Edit componentのみ。live継続利用、Apply/file mutation、現行`cn` CLI、autocomplete、embeddings、IDE UIは未検証 |
 
+LangChainのbatch/concurrency evidenceはone-shotであり、反復batch/concurrency runは未検証です。
+反復exhaustion／interruptionは未検証であり、daemon-mode利用は未検証です。
+
 これらの framework packages は、分離された CI contract dependencies であり、ブリッジの runtime dependencies ではありません。テストでは synthetic credentials と deterministic upstream fixtures を使用するため、通常の project tests と production deployment が frameworks の external services をインストールしたり、接続したりすることはありません。
 
 ### LangChain
 
 ```python
-from langchain_openai import ChatOpenAI
+import asyncio
 
-llm = ChatOpenAI(
-    model="codex",
-    base_url="http://127.0.0.1:8646/v1",
-    api_key=bridge_token,
-    temperature=None,
-    max_retries=0,
-    timeout=240,
-    use_responses_api=True,
-)
+from langchain_openai import ChatOpenAI
+from openai import DefaultAioHttpClient, DefaultHttpxClient
+
+
+async def main() -> None:
+    sync_http_client = DefaultHttpxClient(trust_env=False)
+    async_http_client = DefaultAioHttpClient(trust_env=False)
+    llm = ChatOpenAI(
+        model="codex",
+        base_url="http://127.0.0.1:8646/v1",
+        api_key=bridge_token,
+        temperature=None,
+        max_retries=0,
+        timeout=240,
+        use_responses_api=True,
+        http_client=sync_http_client,
+        http_async_client=async_http_client,
+        http_socket_options=(),
+    )
+    try:
+        response = await llm.ainvoke("Reply briefly.")
+        print(response.content)
+    finally:
+        await llm.root_async_client.close()
+        llm.root_client.close()
+
+
+asyncio.run(main())
 ```
 
 検証済みの Chat Completions path を選択する場合は、`use_responses_api=False` を設定します。`bind_tools` を介して渡す Pydantic models と functions には、nonempty docstring/description が必要です。description が欠けていると `description=""` になる場合があります。ブリッジは正確な tool contract を弱めるのではなく、これを意図的に拒否します。embeddings は別に設定してください。
+async Responses streamingでは`openai[aiohttp]`を導入し、modelが所有するclientを明示的にcloseしてください。
+LangChainが`object=response`、`status=completed`、`chunk_position=last`を持つ最終chunkを公開した後だけ
+outputを成功として受理します。切断前のpartial textは成功ではありません。
+検証済みloopback設定では、proxy継承とLangChain transport注入を防ぐため、両clientへ`trust_env=False`を設定し、
+`http_socket_options=()`を指定します。
 
 ### OpenAI Agents SDK
 

@@ -322,12 +322,15 @@ flowchart LR
 | --- | --- | --- | --- | --- |
 | OpenAI Python SDK | **Live verified** | 1.109.1 and 3.1.0 | Live Chat/Responses non-stream and stream plus offline structured output, function/custom-tool, usage, and compaction contracts | Use `max_retries=0`; this is not verification of unsupported OpenAI API surfaces or long-running application behavior |
 | Honcho | **Operationally verified** | Self-hosted request shape based on revision `444897975c95393b0d48024470ece03c025d3aa4` | Repeated derivation, summary/dream/dialectic generation, structured output, memory-search tool continuation, restart, queue, and existing PostgreSQL/Redis continuity | Embeddings require a separate backend; lossless nullable tool-call content currently requires the compatibility fix tracked in [plastic-labs/honcho#1061](https://github.com/plastic-labs/honcho/issues/1061) |
-| LangChain `ChatOpenAI` | **Operationally verified (scoped)** | `langchain-openai` 1.6.0, `langchain-core` 1.6.0, OpenAI SDK 3.3.1 | Live non-stream, synchronous stream, strict Pydantic output, one-tool and sequential multi-tool Responses, sequential multi-tool Chat, three-turn history, and bounded failure recovery | Set `temperature=None`, `max_retries=0`, and select `use_responses_api`; asynchronous Responses streaming remains unverified |
+| LangChain `ChatOpenAI` | **Operationally verified (scoped)** | `langchain-openai` 1.6.0, `langchain-core` 1.6.0, OpenAI SDK 3.3.1 | Live non-stream, sync stream, asynchronous Responses streaming with the official aiohttp transport, strict Pydantic output, one-tool and sequential multi-tool Responses, sequential multi-tool Chat, three-turn history, bounded `batch()`/`abatch()` concurrency (4 inputs, maximum 2), and recovery after one injected 429 and one mid-stream disconnect | Set `temperature=None`, `max_retries=0`, select `use_responses_api`, install `openai[aiohttp]`, own explicit sync/async clients with `trust_env=False`, set `http_socket_options=()`, and require a typed completed terminal; daemon longevity, concurrency above 2, and repeated exhaustion/interruption remains unverified |
 | OpenAI Agents SDK | **Live verified (configuration required)** | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | Live `OpenAIChatCompletionsModel` basic agent and local `function_tool` loop; offline stream contract | Disable tracing; `OpenAIResponsesModel`, sessions, and hosted tools are not verified |
 | AutoGen | **Contract verified (adapter required)** | `autogen-ext`/`autogen-core`/`autogen-agentchat` 0.7.5, OpenAI SDK 3.2.0 | Direct non-stream/stream and Pydantic JSON Schema; one `AssistantAgent` local function-tool/reflection contract | Requires explicit model metadata and the conditional parallel-tools adapter; live sustained use, teams, code execution, memory, and hosted agents are not verified |
 | Aider | **Contract verified (constrained role)** | `aider-chat` 0.86.2, LiteLLM 1.81.10, OpenAI SDK 2.20.0 | One-shot CLI `--message` contract performs a streaming `whole`-format edit of one existing file | Live sustained use, interactive mode, auto-commit, repo map, architect/weak-model flows, and other edit formats are not verified |
 | Cline CLI | **Live verified (constrained role)** | Linux x64 binary 3.0.55 | One live headless `read_files` → `editor` → `submit_and_exit` edit of one existing file | Requires the documented local-only flags and short system prompt; sustained use, other platforms, default control plane, shell/web/MCP/subagents/teams, IDE/TUI, and non-idempotent tools are not verified |
 | Continue core OpenAI provider | **Contract verified (component only)** | `@continuedev/core` 1.1.0, `tsx` 4.23.12 | Public `streamChat`, Edit-role `streamComplete`, and non-stream function-tool result contract | Chat/Edit component only; live sustained use, Apply/file mutation, current `cn` CLI, autocomplete, embeddings, and IDE UI are not verified |
+
+For LangChain, this is one-shot batch/concurrency evidence; repeated batch/concurrency runs remain unverified.
+Repeated exhaustion/interruption remains unverified; daemon-mode use remains unverified.
 
 These framework packages are isolated CI contract dependencies, not bridge runtime dependencies.
 Their tests use synthetic credentials and deterministic upstream fixtures, so normal project tests
@@ -336,23 +339,47 @@ and production deployment do not install or contact the frameworks' external ser
 ### LangChain
 
 ```python
-from langchain_openai import ChatOpenAI
+import asyncio
 
-llm = ChatOpenAI(
-    model="codex",
-    base_url="http://127.0.0.1:8646/v1",
-    api_key=bridge_token,
-    temperature=None,
-    max_retries=0,
-    timeout=240,
-    use_responses_api=True,
-)
+from langchain_openai import ChatOpenAI
+from openai import DefaultAioHttpClient, DefaultHttpxClient
+
+
+async def main() -> None:
+    sync_http_client = DefaultHttpxClient(trust_env=False)
+    async_http_client = DefaultAioHttpClient(trust_env=False)
+    llm = ChatOpenAI(
+        model="codex",
+        base_url="http://127.0.0.1:8646/v1",
+        api_key=bridge_token,
+        temperature=None,
+        max_retries=0,
+        timeout=240,
+        use_responses_api=True,
+        http_client=sync_http_client,
+        http_async_client=async_http_client,
+        http_socket_options=(),
+    )
+    try:
+        response = await llm.ainvoke("Reply briefly.")
+        print(response.content)
+    finally:
+        await llm.root_async_client.close()
+        llm.root_client.close()
+
+
+asyncio.run(main())
 ```
 
 Set `use_responses_api=False` to select the verified Chat Completions path instead. Pydantic models
 and functions supplied through `bind_tools` need a nonempty docstring/description. A missing
 description can become `description=""`, which the bridge intentionally rejects rather than
 weakening its exact tool contract. Configure embeddings separately.
+For async Responses streaming, install `openai[aiohttp]` and explicitly close the model-owned
+client. Accept output only after LangChain exposes a final chunk with `object=response`,
+`status=completed`, and `chunk_position=last`; partial text before a disconnect is not a success.
+The verified loopback configuration sets `trust_env=False` on both clients and
+`http_socket_options=()` to prevent proxy inheritance and LangChain transport injection.
 
 ### OpenAI Agents SDK
 
