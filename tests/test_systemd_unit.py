@@ -67,7 +67,7 @@ def test_console_script_and_hardened_user_unit_are_canonical() -> None:
     assert service["PrivateTmp"] == "true"
     assert service["ProtectSystem"] == "strict"
     assert service["ProtectHome"] == "read-only"
-    assert service["ReadWritePaths"] == "%h/.hermes"
+    assert service["ReadWritePaths"] == "%h/.codex"
     assert service["RestrictAddressFamilies"] == "AF_UNIX AF_INET AF_INET6"
     assert service["UMask"] == "0077"
     assert service.get("Environment", "").split() == [
@@ -79,6 +79,8 @@ def test_console_script_and_hardened_user_unit_are_canonical() -> None:
     assert "EnvironmentFile=" not in raw
     assert re.search(r"CODEX_BRIDGE_CLIENT_TOKEN\s*=", raw) is None
     for forbidden in ("Authorization:", "Bearer ", "access_token", "chatgpt_account_id"):
+        assert forbidden not in raw
+    for forbidden in ("%h/.hermes", "CODEX_BRIDGE_HERMES_PYTHON", "OPENAI_API_KEY"):
         assert forbidden not in raw
 
 
@@ -116,8 +118,11 @@ def test_deployment_readme_covers_complete_operator_contract_without_secrets() -
         "max_retries=0",
         "EMBED_MESSAGES=false",
         "$HOME/src/codex-openai-bridge",
-        "$HOME/.hermes/hermes-agent/venv/bin/python",
-        "ReadWritePaths=%h/.hermes",
+        "codex login",
+        'cli_auth_credentials_store = "file"',
+        "CODEX_BRIDGE_CODEX_PATH",
+        "CODEX_BRIDGE_CODEX_HOME",
+        "ReadWritePaths=%h/.codex",
     ):
         assert required in readme
 

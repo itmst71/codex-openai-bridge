@@ -48,32 +48,67 @@ def test_publication_policy_is_explicit_and_bilingual() -> None:
         assert required in japanese
 
 
-def test_authentication_prerequisites_are_explicit_and_bilingual() -> None:
+def test_official_codex_cli_authentication_prerequisites_are_bilingual() -> None:
     english = README.read_text(encoding="utf-8")
     japanese = README_JA.read_text(encoding="utf-8")
+    security = SECURITY.read_text(encoding="utf-8")
+
+    assert english.count("## Prerequisites") == 1
+    assert japanese.count("## 前提条件") == 1
+    for obsolete in (
+        "current release requires the Hermes-internal Codex credential resolver",
+        "Official Codex CLI authentication is the intended replacement but is not supported",
+    ):
+        assert obsolete not in english
+    for obsolete in (
+        "現行releaseはHermes内部のCodex credential resolverを必要とします",
+        "公式Codex CLI認証が移行先ですが、このreleaseではまだ対応していません",
+    ):
+        assert obsolete not in japanese
 
     for required in (
         "## Prerequisites",
-        "current release requires the Hermes-internal Codex credential resolver",
-        "Consumers do not require Hermes",
-        (
-            "Official Codex CLI authentication is the intended replacement but is not "
-            "supported by this release"
-        ),
-        "API-key authentication is not a project goal",
+        "official OpenAI Codex CLI",
+        "codex login",
+        "codex login --device-auth",
+        'cli_auth_credentials_store = "file"',
+        "$HOME/.codex/auth.json",
+        'chmod 700 "$HOME/.codex"',
+        'chmod 600 "$HOME/.codex/auth.json"',
+        "Keyring and `auto` storage are not supported",
+        "Codex CLI 0.146.0 is the verified version",
+        "Other Codex CLI versions remain unverified",
+        "Hermes is not required",
+        "API-key authentication is intentionally unsupported",
         "use the official OpenAI API directly without this bridge",
     ):
         assert required in english
 
     for required in (
         "## 前提条件",
-        "現行releaseはHermes内部のCodex credential resolverを必要とします",
-        "consumer側にHermesは不要です",
-        "公式Codex CLI認証が移行先ですが、このreleaseではまだ対応していません",
-        "API key認証はこのprojectの目標ではありません",
-        "このbridgeを使わず公式OpenAI APIへ直接接続してください",
+        "OpenAI公式Codex CLI",
+        "codex login",
+        "codex login --device-auth",
+        'cli_auth_credentials_store = "file"',
+        "$HOME/.codex/auth.json",
+        'chmod 700 "$HOME/.codex"',
+        'chmod 600 "$HOME/.codex/auth.json"',
+        "keyringと`auto` storageは",
+        "Codex CLI 0.146.0が検証済みversion",
+        "他のCodex CLI versionは未検証",
+        "Hermesは不要です",
+        "API key認証は意図的に非対応",
+        "このbridgeを使わず",
     ):
         assert required in japanese
+
+    assert english.index('cli_auth_credentials_store = "file"') < english.index("codex login")
+    assert japanese.index('cli_auth_credentials_store = "file"') < japanese.index("codex login")
+    for required in (
+        "Codex CLI 0.146.0 is the verified version",
+        "Other Codex CLI versions remain unverified",
+    ):
+        assert required in security
 
 
 def test_consumer_status_taxonomy_distinguishes_evidence_levels() -> None:

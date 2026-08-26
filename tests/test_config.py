@@ -1,9 +1,9 @@
+import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
 
-import codex_openai_bridge.config as config_module
 from codex_openai_bridge.config import ConfigError, Settings
 
 MIB = 1024 * 1024
@@ -100,48 +100,47 @@ def test_default_paths_are_derived_from_current_user_home(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("CODEX_BRIDGE_HERMES_PYTHON", raising=False)
-    monkeypatch.delenv("CODEX_BRIDGE_HELPER_PATH", raising=False)
+    monkeypatch.delenv("CODEX_BRIDGE_CODEX_PATH", raising=False)
+    monkeypatch.delenv("CODEX_BRIDGE_CODEX_HOME", raising=False)
     monkeypatch.delenv("CODEX_BRIDGE_CLIENT_TOKEN_FILE", raising=False)
 
     settings = Settings.from_env()
 
-    assert settings.hermes_python_path == (
-        home / ".hermes" / "hermes-agent" / "venv" / "bin" / "python"
-    )
-    assert (
-        settings.helper_path
-        == Path(config_module.__file__).with_name("hermes_credential_helper.py").resolve()
-    )
+    assert settings.codex_path == home / ".local" / "bin" / "codex"
+    assert settings.codex_home == home / ".codex"
     assert settings.client_token_file == home / ".config" / "codex-openai-bridge" / "client-token"
-    assert settings.hermes_python_path.is_absolute()
-    assert settings.helper_path.is_absolute()
+    assert settings.codex_path.is_absolute()
+    assert settings.codex_home.is_absolute()
+    assert settings.credential_python_path == Path(sys.executable)
+    assert settings.credential_python_path.is_absolute()
+
     assert settings.client_token_file.is_absolute()
+    assert not hasattr(settings, "hermes_python_path")
 
 
 def test_accepts_absolute_path_overrides(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    hermes_python = tmp_path / "hermes-python"
-    helper = tmp_path / "helper.py"
+    codex_path = tmp_path / "bin" / "codex"
+    codex_home = tmp_path / "codex-home"
     token_file = tmp_path / "client-token"
-    monkeypatch.setenv("CODEX_BRIDGE_HERMES_PYTHON", str(hermes_python))
-    monkeypatch.setenv("CODEX_BRIDGE_HELPER_PATH", str(helper))
+    monkeypatch.setenv("CODEX_BRIDGE_CODEX_PATH", str(codex_path))
+    monkeypatch.setenv("CODEX_BRIDGE_CODEX_HOME", str(codex_home))
     monkeypatch.setenv("CODEX_BRIDGE_CLIENT_TOKEN_FILE", str(token_file))
 
     settings = Settings.from_env()
 
-    assert settings.hermes_python_path == hermes_python
-    assert settings.helper_path == helper
+    assert settings.codex_path == codex_path
+    assert settings.codex_home == codex_home
     assert settings.client_token_file == token_file
 
 
 @pytest.mark.parametrize(
     "name",
     [
-        "CODEX_BRIDGE_HERMES_PYTHON",
-        "CODEX_BRIDGE_HELPER_PATH",
+        "CODEX_BRIDGE_CODEX_PATH",
+        "CODEX_BRIDGE_CODEX_HOME",
         "CODEX_BRIDGE_CLIENT_TOKEN_FILE",
     ],
 )
@@ -163,9 +162,26 @@ def test_rejects_unsafe_configured_paths(
     monkeypatch: pytest.MonkeyPatch,
     raw: str,
 ) -> None:
-    monkeypatch.setenv("CODEX_BRIDGE_HELPER_PATH", raw)
+    monkeypatch.setenv("CODEX_BRIDGE_CODEX_PATH", raw)
 
-    with pytest.raises(ConfigError, match="CODEX_BRIDGE_HELPER_PATH"):
+    with pytest.raises(ConfigError, match="CODEX_BRIDGE_CODEX_PATH"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(
+    "obsolete",
+    [
+        "CODEX_BRIDGE_" + "HERMES_PYTHON",
+        "CODEX_BRIDGE_" + "HELPER_PATH",
+    ],
+)
+def test_rejects_obsolete_hermes_credential_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    obsolete: str,
+) -> None:
+    monkeypatch.setenv(obsolete, "/tmp/obsolete")
+
+    with pytest.raises(ConfigError, match="unsupported"):
         Settings.from_env()
 
 

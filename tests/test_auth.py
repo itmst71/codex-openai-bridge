@@ -1,8 +1,6 @@
-"""Hermes credential helper boundary tests."""
+"""Official Codex CLI credential helper boundary tests."""
 
 import asyncio
-import base64
-import json
 import os
 import selectors
 import signal
@@ -12,13 +10,11 @@ import time
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
-from types import ModuleType
 from typing import Any, cast
 
 import pytest
 
 import codex_openai_bridge.auth as auth_module
-from codex_openai_bridge import hermes_credential_helper
 from codex_openai_bridge.auth import (
     Credential,
     CredentialManager,
@@ -31,11 +27,13 @@ from codex_openai_bridge.config import Settings
 
 def _settings(tmp_path: Path, helper_source: str) -> Settings:
     helper_path = tmp_path / "credential_helper.py"
-    helper_path.write_text(helper_source)
+    helper_path.write_text(f"#!{sys.executable}\n{helper_source}")
+    helper_path.chmod(0o700)
     return replace(
         Settings.from_env(),
-        hermes_python_path=Path(sys.executable),
-        helper_path=helper_path,
+        credential_python_path=helper_path,
+        codex_path=tmp_path / "codex",
+        codex_home=tmp_path / "codex-home",
         helper_deadline_seconds=2.0,
     )
 
@@ -149,7 +147,13 @@ def test_runner_uses_exact_argv_and_isolated_pipes(
     )
     assert calls == [
         (
-            [settings.hermes_python_path, settings.helper_path, *suffix],
+            [
+                settings.credential_python_path,
+                "-I",
+                "-m",
+                "codex_openai_bridge.codex_cli_credential_helper",
+                *suffix,
+            ],
             {
                 "shell": False,
                 "stdin": subprocess.DEVNULL,
@@ -157,6 +161,11 @@ def test_runner_uses_exact_argv_and_isolated_pipes(
                 "stderr": subprocess.PIPE,
                 "close_fds": True,
                 "start_new_session": True,
+                "env": {
+                    "CODEX_BRIDGE_CODEX_HOME": str(settings.codex_home),
+                    "CODEX_BRIDGE_CODEX_PATH": str(settings.codex_path),
+                    "HOME": str(Path.home()),
+                },
             },
         )
     ]
@@ -210,7 +219,7 @@ def test_runner_rejects_nonzero_exit_without_echoing_child_data_or_path(tmp_path
 
     rendered = f"{raised.value!s} {raised.value!r}"
     assert secret not in rendered
-    assert str(settings.helper_path) not in rendered
+    assert str(settings.credential_python_path) not in rendered
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
 
@@ -218,8 +227,8 @@ def test_runner_rejects_nonzero_exit_without_echoing_child_data_or_path(tmp_path
 @pytest.mark.parametrize(
     "change,force_refresh",
     [
-        ({"helper_path": Path("relative-helper.py")}, False),
-        ({"helper_path": Path("/tmp/helper\n.py")}, False),
+        ({"credential_python_path": Path("relative-helper.py")}, False),
+        ({"credential_python_path": Path("/tmp/helper\n.py")}, False),
         ({"max_helper_stdout_bytes": True}, False),
         ({"max_helper_stdout_bytes": 64 * 1024 + 1}, False),
         ({"max_helper_stderr_bytes": 0}, False),
@@ -564,176 +573,29 @@ async def test_manager_failure_does_not_poison_retry(
     assert calls == 2
 
 
-def _jwt(payload: dict[str, object]) -> str:
-    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).rstrip(
-        b"="
-    )
-    return f"header.{encoded.decode()}.signature"
-
-
-def _install_fake_hermes(
+@pytest.mark.asyncio
+async def test_manager_rejects_account_swap_during_force_refresh(
     monkeypatch: pytest.MonkeyPatch,
-    resolver: Callable[..., object],
-) -> None:
-    package = ModuleType("hermes_cli")
-    package.__path__ = []
-    auth = ModuleType("hermes_cli.auth")
-    auth.resolve_codex_runtime_credentials = resolver  # type: ignore[attr-defined]
-    package.auth = auth  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "hermes_cli", package)
-    monkeypatch.setitem(sys.modules, "hermes_cli.auth", auth)
-
-
-def test_helper_loads_hermes_source_from_its_venv_prefix_without_ambient_pythonpath(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    hermes_root = tmp_path / "hermes-agent"
-    venv = hermes_root / "venv"
-    package = hermes_root / "hermes_cli"
-    helper_package = tmp_path / "bridge-package"
-    venv.mkdir(parents=True)
-    package.mkdir()
-    helper_package.mkdir()
-    (helper_package / "hermes_credential_helper.py").write_text("", encoding="utf-8")
-    (helper_package / "collision_probe.py").write_text(
-        "ORIGIN = 'bridge sibling'\n",
-        encoding="utf-8",
-    )
-    (package / "__init__.py").write_text("", encoding="utf-8")
-    token = _jwt(
-        {
-            "exp": 4_102_444_800,
-            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-live-shape"},
-        }
-    )
-    (package / "auth.py").write_text(
-        "try:\n"
-        "    import collision_probe\n"
-        "except ModuleNotFoundError:\n"
-        "    pass\n"
-        "else:\n"
-        "    raise RuntimeError('helper sibling import path leaked')\n"
-        "def resolve_codex_runtime_credentials(*, force_refresh):\n"
-        f"    return {{'api_key': {token!r}, 'base_url': 'https://example.invalid'}}\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(sys, "prefix", str(venv))
-    monkeypatch.setattr(
-        hermes_credential_helper,
-        "__file__",
-        str(helper_package / "hermes_credential_helper.py"),
-    )
-    monkeypatch.syspath_prepend(str(helper_package))
-    monkeypatch.delitem(sys.modules, "hermes_cli", raising=False)
-    monkeypatch.delitem(sys.modules, "hermes_cli.auth", raising=False)
-    original_path = list(sys.path)
+    calls = 0
+    monkeypatch.setattr(asyncio, "to_thread", _test_to_thread)
 
-    try:
-        assert hermes_credential_helper.main([]) == 0
-        captured = capsys.readouterr()
-    finally:
-        sys.modules.pop("hermes_cli.auth", None)
-        sys.modules.pop("hermes_cli", None)
+    def fake_runner(settings: Settings, *, force_refresh: bool = False) -> Credential:
+        nonlocal calls
+        del settings
+        calls += 1
+        account = "account-a" if not force_refresh else "account-b"
+        return Credential(f"token-{calls}", "u", account, int(time.time()) + 3600)
 
-    assert captured.err == ""
-    assert json.loads(captured.out) == {
-        "version": 1,
-        "access_token": token,
-        "base_url": "https://example.invalid",
-        "account_id": "acct-live-shape",
-        "expires_at": 4_102_444_800,
-    }
-    assert sys.path == original_path
+    monkeypatch.setattr(auth_module, "run_credential_helper", fake_runner)
+    manager = CredentialManager(_settings(tmp_path, SUCCESS_SOURCE))
 
+    original = await manager.get_credentials()
+    with pytest.raises(CredentialUnavailable, match="credentials are unavailable"):
+        await manager.get_credentials(force_refresh=True)
+    cached = await manager.get_credentials()
 
-@pytest.mark.parametrize("argv,expected_force", [([], False), (["--force-refresh"], True)])
-def test_helper_emits_only_versioned_protocol_and_calls_resolver_with_exact_bool(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    argv: list[str],
-    expected_force: bool,
-) -> None:
-    calls: list[bool] = []
-    token = _jwt(
-        {
-            "exp": 4_102_444_800,
-            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"},
-        }
-    )
-
-    def resolver(*, force_refresh: bool) -> object:
-        calls.append(force_refresh)
-        print("resolver diagnostic")
-        print("resolver stderr diagnostic", file=sys.stderr)
-        return {"api_key": token, "base_url": "https://example.invalid"}
-
-    _install_fake_hermes(monkeypatch, resolver)
-
-    assert hermes_credential_helper.main(argv) == 0
-
-    captured = capsys.readouterr()
-    assert captured.err == ""
-    assert json.loads(captured.out) == {
-        "version": 1,
-        "access_token": token,
-        "base_url": "https://example.invalid",
-        "account_id": "acct-1",
-        "expires_at": 4_102_444_800,
-    }
-    assert calls == [expected_force]
-
-
-def test_helper_jwt_extraction_supports_absent_optional_claims() -> None:
-    assert hermes_credential_helper.extract_jwt_metadata(_jwt({})) == (None, None)
-    assert hermes_credential_helper.extract_jwt_metadata(_jwt({"exp": 123})) == (123, None)
-
-
-@pytest.mark.parametrize(
-    "token",
-    [
-        "not-a-jwt",
-        "header.%%%%.signature",
-        "header." + "a" * (20 * 1024) + ".signature",
-        _jwt({"exp": True}),
-        _jwt({"exp": 0}),
-        _jwt({"https://api.openai.com/auth": []}),
-        _jwt({"https://api.openai.com/auth": {"chatgpt_account_id": ""}}),
-    ],
-)
-def test_helper_jwt_extraction_rejects_malformed_or_unbounded_payload(token: str) -> None:
-    with pytest.raises(ValueError, match="credential metadata is unavailable"):
-        hermes_credential_helper.extract_jwt_metadata(token)
-
-
-@pytest.mark.parametrize("argv", [["--unknown"], ["--force-refresh", "--force-refresh"], ["x"]])
-def test_helper_rejects_all_other_arguments_with_fixed_error(
-    capsys: pytest.CaptureFixture[str],
-    argv: list[str],
-) -> None:
-    assert hermes_credential_helper.main(argv) != 0
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == "credential helper failed\n"
-
-
-def test_helper_failure_never_emits_resolver_secret(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    secret = "SENSITIVE_HELPER_TOKEN_456"
-
-    def resolver(*, force_refresh: bool) -> object:
-        del force_refresh
-        print(secret)
-        print(secret, file=sys.stderr)
-        raise RuntimeError(secret)
-
-    _install_fake_hermes(monkeypatch, resolver)
-
-    assert hermes_credential_helper.main([]) != 0
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == "credential helper failed\n"
-    assert secret not in captured.err
+    assert original.account_id == "account-a"
+    assert cached is original
+    assert calls == 2

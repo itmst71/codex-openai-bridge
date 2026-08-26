@@ -10,18 +10,44 @@
 
 Codex Responses backend のための、処理範囲を制限した loopback 専用の OpenAI 互換 HTTP ブリッジです。OpenAI Python SDK、Honcho、LangChain、OpenAI Agents SDK などのコンシューマーは、安定した公開モデルエイリアス（`codex`）を使用できます。一方、upstream URL、OAuth 認証、account ID、実際の model はサーバー側で管理されます。
 
-このプロジェクトは独立した変換サービスです。Hermes の agent loop、system prompt、memory、tools は実行**しません**。
+このプロジェクトは独立した変換サービスです。agent loop、system prompt、memory、tools は実行**しません**。
 
 ## 前提条件
 
-現行releaseはHermes内部のCodex credential resolverを必要とします。これはbridge host側だけの
-依存であり、consumer側にHermesは不要です。
-公式Codex CLI認証が移行先ですが、このreleaseではまだ対応していません。
-この依存は一時的なものであり、公式`codex login` flowへ置き換える予定です。
+bridge hostへOpenAI公式Codex CLIをinstallしてください。
+このreleaseではCodex CLI 0.146.0が検証済みversionです。
+他のCodex CLI versionは未検証です。
 
-API key認証はこのprojectの目標ではありません。OpenAI API keyを利用する場合は、
-このbridgeを使わず公式OpenAI APIへ直接接続してください。このprojectはChatGPT/Codex OAuth backend専用を
-維持し、API key fallbackやprovider切替は追加しません。
+```bash
+codex --version
+```
+
+login前に、初期対応するcredential storeであるfile modeを`$HOME/.codex/config.toml`へ設定します。
+
+```toml
+cli_auth_credentials_store = "file"
+```
+
+その後、ChatGPTでloginします。
+
+```bash
+codex login                 # または: codex login --device-auth
+codex login status
+```
+
+login後にcredential directoryとfileのauthorityを正規化します。
+
+```bash
+chmod 700 "$HOME/.codex"
+chmod 600 "$HOME/.codex/auth.json"
+```
+
+生成される`$HOME/.codex/auth.json`はpasswordと同等に扱ってください。owner-only、mode `0600`を
+維持し、issue、log、chat、このrepositoryへコピーしないでください。keyringと`auto` storageは
+このreleaseでは非対応です。Hermesは不要です。第三者agent frameworkも必要ありません。
+
+API key認証は意図的に非対応です。OpenAI API keyを利用する場合は、このbridgeを使わず
+公式OpenAI APIへ直接接続してください。API key fallbackやprovider切替は追加しません。
 
 ## 想定用途とサービス利用条件
 
@@ -52,7 +78,7 @@ Policy参照先: [Codex利用に関する説明](https://x.com/thsottiaux/status
 flowchart TD
     consumers["OpenAI SDK / Honcho / 検証済みコンシューマー"]
     bridge["127.0.0.1:8646<br/>codex-openai-bridge"]
-    resolver["Hermes Codex OAuth resolver"]
+    resolver["OpenAI公式Codex CLI<br/>ChatGPT OAuth authority"]
     upstream["固定 Codex Responses upstream"]
 
     consumers -->|"Bearer bridge client token"| bridge
@@ -98,7 +124,7 @@ flowchart LR
     auth["Bridge-token 認証"]
     validation["厳格な schema と bounds の検証"]
     policy["サーバー管理 policy の projection"]
-    resolver["制限付き Hermes credential resolver"]
+    resolver["制限付き公式Codex CLI credential resolver"]
     upstream["Codex Responses upstream"]
     lifecycle["Response / SSE lifecycle の検証"]
     public["OpenAI-compatible 公開 response"]
@@ -142,10 +168,10 @@ Offline contract tests は、固定した OpenAI Python SDK 1.109.1 と、別途
 - Bind addresses は loopback IPs でなければなりません。デフォルト値およびデプロイ時の値は `127.0.0.1` です。
 - 保護対象の各 endpoint では、専用の 43 文字のブリッジ client token が必要です。この token は Codex OAuth token ではありません。
 - ブリッジ client token は、owner-only、mode `0600`、non-symlink regular file から読み込まれます。
-- Codex OAuth credentials は、Hermes Python environment を使用する処理時間制限付き subprocess によって解決されます。この repository や systemd unit にはコピーされません。
+- Codex OAuth credentialsは、OpenAI公式Codex CLIのfile storeから制限付きhelperを通して読みます。loginとrefreshを書き込むauthorityはCodex CLIだけであり、このrepositoryやsystemd unitへcredentialをコピーしません。
 - Upstream URL、authorization、account ID、model、prompts、tool arguments、encrypted reasoning は、operational logs と sanitized errors から除外されます。
 - Request bodies、JSON structure、helper output、upstream bodies、SSE events/streams、queueing、concurrency、deadlines、shutdown には制限が適用されます。
-- Hermes はそこで認証状態を atomic に更新する場合があるため、`ProtectHome=read-only` は `ReadWritePaths=%h/.hermes` を指定した場合に限って緩和されます。systemd units では、`%h` は service user の home directory に展開されます。
+- OpenAI公式Codex CLIが認証状態をatomicに更新する場合があるため、`ProtectHome=read-only`は`ReadWritePaths=%h/.codex`を指定した場合に限って緩和されます。systemd unitでは、`%h`はservice userのhome directoryへ展開されます。
 - sandbox は、意図しないアクセスと service compromise の影響を軽減します。同じ Unix UID ですでに実行されているあらゆる malicious process から保護できるとはしていません。
 - port 8646 を public reverse proxy 経由で公開しないでください。信頼できる remote コンシューマーが必要な場合は、別途レビューした authenticated tunnel を使用し、loopback bind を維持してください。
 
@@ -168,8 +194,8 @@ service は、検証済みの environment variables を読み込みます。主�
 | `CODEX_BRIDGE_PORT` | `8646` | TCP port 1–65535 |
 | `CODEX_BRIDGE_CLIENT_TOKEN_FILE` | `~/.config/codex-openai-bridge/client-token` | Absolute path。owner、regular file、mode `0600` |
 | `CODEX_BRIDGE_UPSTREAM_MODEL` | project default | サーバーが管理する canonical model identifier |
-| `CODEX_BRIDGE_HERMES_PYTHON` | `$HOME/.hermes/hermes-agent/venv/bin/python` | Hermes credential-helper interpreter。現在の user の home から解決される |
-| `CODEX_BRIDGE_HELPER_PATH` | installed package helper | Absolute helper path |
+| `CODEX_BRIDGE_CODEX_PATH` | `$HOME/.local/bin/codex` | OpenAI公式Codex CLI executableのabsolute path |
+| `CODEX_BRIDGE_CODEX_HOME` | `$HOME/.codex` | file-mode `auth.json`を含むCodex CLI homeのabsolute path |
 | `CODEX_BRIDGE_MAX_IN_FLIGHT` | `2` | 同時実行 owners の上限。最大 10 |
 | `CODEX_BRIDGE_QUEUE_WAIT_SECONDS` | `10` | admission wait の上限 |
 | `CODEX_BRIDGE_TOTAL_REQUEST_DEADLINE_SECONDS` | `240` | downstream writes を含む request 全体 |
@@ -639,7 +665,7 @@ systemctl --user daemon-reload
 systemctl --user start codex-openai-bridge.service
 ```
 
-rollback では、以前に記録した reviewed revision と、それに対応する lockfile/unit を使用して、同じ制限付き手順を繰り返します。異なる revisions の source、lockfile、virtual environment、unit definitions を混在させないでください。external token と Hermes authentication state は Git rollback の対象ではありません。
+rollbackでは、以前に記録したreviewed revisionと、それに対応するlockfile/unitを使用して、同じ制限付き手順を繰り返します。異なるrevisionのsource、lockfile、virtual environment、unit definitionsを混在させないでください。bridge client tokenとOpenAI公式Codex CLI authentication stateはGit rollbackの対象ではありません。
 
 ## 明示的に有効化する live tests
 

@@ -11,18 +11,48 @@
 
 A bounded, loopback-only OpenAI-compatible HTTP bridge for the Codex Responses backend. It lets consumers such as the OpenAI Python SDK, Honcho, LangChain, and the OpenAI Agents SDK use a stable public model alias (`codex`) while keeping the upstream URL, OAuth authorization, account ID, and real model under server control.
 
-This project is an independent translation service. It does **not** run the Hermes agent loop, system prompt, memory, or tools.
+This project is an independent translation service. It does **not** run an agent loop, system
+prompt, memory, or tools.
 
 ## Prerequisites
 
-The current release requires the Hermes-internal Codex credential resolver on the bridge host.
-Consumers do not require Hermes; only the bridge process uses that credential boundary.
-Official Codex CLI authentication is the intended replacement but is not supported by this release. This
-dependency is temporary and is being removed in favor of the official `codex login` flow.
+Install the official OpenAI Codex CLI on the bridge host.
+Codex CLI 0.146.0 is the verified version for this release.
+Other Codex CLI versions remain unverified.
 
-API-key authentication is not a project goal. If you have an OpenAI API key,
-use the official OpenAI API directly without this bridge. This project remains specific to the ChatGPT/Codex OAuth
-backend and will not add an API-key fallback or provider switch.
+```bash
+codex --version
+```
+
+Before login, configure the initial supported credential store, file mode, in
+`$HOME/.codex/config.toml`:
+
+```toml
+cli_auth_credentials_store = "file"
+```
+
+Then sign in with ChatGPT:
+
+```bash
+codex login                 # or: codex login --device-auth
+codex login status
+```
+
+Normalize the credential directory and file authority after login:
+
+```bash
+chmod 700 "$HOME/.codex"
+chmod 600 "$HOME/.codex/auth.json"
+```
+
+The resulting `$HOME/.codex/auth.json` is password-equivalent. Keep it owner-only at mode `0600`
+and never copy it into issues, logs, chat, or this repository.
+Keyring and `auto` storage are not supported by this release. Hermes is not required;
+no third-party agent framework is required.
+
+API-key authentication is intentionally unsupported. If you have an OpenAI API key,
+use the official OpenAI API directly without this bridge; this project will not add an API-key
+fallback or provider switch.
 
 ## Intended use and service terms
 
@@ -54,7 +84,7 @@ Policy references: [Codex usage clarification](https://x.com/thsottiaux/status/2
 flowchart TD
     consumers["OpenAI SDK / Honcho / verified consumers"]
     bridge["127.0.0.1:8646<br/>codex-openai-bridge"]
-    resolver["Hermes Codex OAuth resolver"]
+    resolver["Official Codex CLI<br/>ChatGPT OAuth authority"]
     upstream["Fixed Codex Responses upstream"]
 
     consumers -->|"Bearer bridge client token"| bridge
@@ -103,7 +133,7 @@ flowchart LR
     auth["Bridge-token authentication"]
     validation["Strict schema and bounds validation"]
     policy["Server-owned policy projection"]
-    resolver["Bounded Hermes credential resolver"]
+    resolver["Bounded official Codex CLI credential resolver"]
     upstream["Codex Responses upstream"]
     lifecycle["Response / SSE lifecycle validation"]
     public["OpenAI-compatible public response"]
@@ -165,10 +195,10 @@ Responses request, function/custom tool, non-stream, and stream subset is tested
 - Bind addresses must be loopback IPs. The default and deployed value is `127.0.0.1`.
 - Every protected endpoint requires a separate 43-character bridge client token. This token is not the Codex OAuth token.
 - The bridge client token is loaded from an owner-only, mode `0600`, non-symlink regular file.
-- Codex OAuth credentials are resolved by a bounded subprocess using the Hermes Python environment. They are not copied into this repository or the systemd unit.
+- Codex OAuth credentials are read from the official Codex CLI file store through a bounded helper. The Codex CLI remains the only login and refresh authority; credentials are not copied into this repository or the systemd unit.
 - Upstream URL, authorization, account ID, model, prompts, tool arguments, and encrypted reasoning are excluded from operational logs and sanitized errors.
 - Request bodies, JSON structure, helper output, upstream bodies, SSE events/streams, queueing, concurrency, deadlines, and shutdown are bounded.
-- `ProtectHome=read-only` is relaxed only with `ReadWritePaths=%h/.hermes` because Hermes may atomically refresh authentication state there. In systemd units, `%h` expands to the service user's home directory.
+- `ProtectHome=read-only` is relaxed only with `ReadWritePaths=%h/.codex` because the official Codex CLI may atomically refresh authentication state there. In systemd units, `%h` expands to the service user's home directory.
 - The sandbox reduces accidental access and service compromise impact. It does not claim protection from every malicious process already running as the same Unix UID.
 - Do not expose port 8646 through a public reverse proxy. If a remote trusted consumer is required, use a separately reviewed authenticated tunnel and preserve the loopback bind.
 
@@ -191,8 +221,8 @@ The service reads validated environment variables. Important settings and defaul
 | `CODEX_BRIDGE_PORT` | `8646` | TCP port 1–65535 |
 | `CODEX_BRIDGE_CLIENT_TOKEN_FILE` | `~/.config/codex-openai-bridge/client-token` | Absolute path; owner, regular file, mode `0600` |
 | `CODEX_BRIDGE_UPSTREAM_MODEL` | project default | Canonical server-owned model identifier |
-| `CODEX_BRIDGE_HERMES_PYTHON` | `$HOME/.hermes/hermes-agent/venv/bin/python` | Hermes credential-helper interpreter; resolved from the current user's home |
-| `CODEX_BRIDGE_HELPER_PATH` | installed package helper | Absolute helper path |
+| `CODEX_BRIDGE_CODEX_PATH` | `$HOME/.local/bin/codex` | Absolute path to the official Codex CLI executable |
+| `CODEX_BRIDGE_CODEX_HOME` | `$HOME/.codex` | Absolute Codex CLI home containing file-mode `auth.json` |
 | `CODEX_BRIDGE_MAX_IN_FLIGHT` | `2` | Bounded concurrent owners, maximum 10 |
 | `CODEX_BRIDGE_QUEUE_WAIT_SECONDS` | `10` | Bounded admission wait |
 | `CODEX_BRIDGE_TOTAL_REQUEST_DEADLINE_SECONDS` | `240` | Whole request, including downstream writes |
@@ -742,7 +772,7 @@ systemctl --user daemon-reload
 systemctl --user start codex-openai-bridge.service
 ```
 
-For rollback, repeat the same bounded procedure with the previously recorded reviewed revision and its matching lockfile/unit. Do not mix source, lockfile, virtual environment, and unit definitions from different revisions. The external token and Hermes authentication state are not part of a Git rollback.
+For rollback, repeat the same bounded procedure with the previously recorded reviewed revision and its matching lockfile/unit. Do not mix source, lockfile, virtual environment, and unit definitions from different revisions. The bridge client token and official Codex CLI authentication state are not part of a Git rollback.
 
 ## Opt-in live tests
 

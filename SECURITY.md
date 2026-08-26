@@ -16,6 +16,12 @@ The bridge translates a bounded protocol subset; it is not a secret manager, ten
 hosted inference service, or OpenAI Developer API replacement. Shared services and production
 automation should use the official OpenAI API with credentials and terms suitable for that use.
 
+The supported credential authority is the official Codex CLI signed in with ChatGPT and configured
+for file storage. Codex CLI 0.146.0 is the verified version.
+Other Codex CLI versions remain unverified. API-key login, keyring scraping, provider fallback,
+account pooling, and bridge-owned OAuth are outside this project's scope. Treat
+`$CODEX_HOME/auth.json` as a password; never include it or any of its fields in a report.
+
 ## Reporting a vulnerability
 
 Use GitHub's private vulnerability-reporting form for this repository when it is available.

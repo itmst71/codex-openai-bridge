@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import sys
 import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal
@@ -14,6 +15,35 @@ _MIB = 1024 * 1024
 _DECIMAL_INTEGER = re.compile(r"(?:0|[1-9][0-9]*)")
 _DECIMAL_NUMBER = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_KNOWN_ENVIRONMENT = frozenset(
+    {
+        "CODEX_BRIDGE_CLIENT_TOKEN_FILE",
+        "CODEX_BRIDGE_CODEX_HOME",
+        "CODEX_BRIDGE_CODEX_PATH",
+        "CODEX_BRIDGE_CONNECT_TIMEOUT_SECONDS",
+        "CODEX_BRIDGE_HELPER_DEADLINE_SECONDS",
+        "CODEX_BRIDGE_HOST",
+        "CODEX_BRIDGE_MAX_HELPER_STDERR_BYTES",
+        "CODEX_BRIDGE_MAX_HELPER_STDOUT_BYTES",
+        "CODEX_BRIDGE_MAX_IN_FLIGHT",
+        "CODEX_BRIDGE_MAX_JSON_DEPTH",
+        "CODEX_BRIDGE_MAX_JSON_NODES",
+        "CODEX_BRIDGE_MAX_MESSAGES",
+        "CODEX_BRIDGE_MAX_REQUEST_BODY_BYTES",
+        "CODEX_BRIDGE_MAX_SSE_EVENT_BYTES",
+        "CODEX_BRIDGE_MAX_STREAM_BYTES",
+        "CODEX_BRIDGE_MAX_STRING_BYTES",
+        "CODEX_BRIDGE_MAX_TOOLS",
+        "CODEX_BRIDGE_MAX_UPSTREAM_BODY_BYTES",
+        "CODEX_BRIDGE_PORT",
+        "CODEX_BRIDGE_PUBLIC_MODEL",
+        "CODEX_BRIDGE_QUEUE_WAIT_SECONDS",
+        "CODEX_BRIDGE_RESPONSE_HEADER_TIMEOUT_SECONDS",
+        "CODEX_BRIDGE_STREAM_IDLE_TIMEOUT_SECONDS",
+        "CODEX_BRIDGE_TOTAL_REQUEST_DEADLINE_SECONDS",
+        "CODEX_BRIDGE_UPSTREAM_MODEL",
+    }
+)
 
 
 class ConfigError(ValueError):
@@ -68,8 +98,9 @@ class Settings:
     port: int
     public_model: str
     upstream_model: str
-    hermes_python_path: Path
-    helper_path: Path
+    codex_path: Path
+    codex_home: Path
+    credential_python_path: Path
     client_token_file: Path
     max_request_body_bytes: int
     max_json_depth: int
@@ -129,6 +160,9 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
+        for name in os.environ:
+            if name.startswith("CODEX_BRIDGE_") and name not in _KNOWN_ENVIRONMENT:
+                raise ConfigError(f"{name} is unsupported")
         host = os.environ.get("CODEX_BRIDGE_HOST", "127.0.0.1")
         try:
             address = ipaddress.ip_address(host)
@@ -142,14 +176,11 @@ class Settings:
             port=_bounded_int("CODEX_BRIDGE_PORT", 8646, minimum=1, maximum=65_535),
             public_model="codex",
             upstream_model=_configured_model(),
-            hermes_python_path=_configured_path(
-                "CODEX_BRIDGE_HERMES_PYTHON",
-                Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "python",
+            codex_path=_configured_path(
+                "CODEX_BRIDGE_CODEX_PATH", Path.home() / ".local" / "bin" / "codex"
             ),
-            helper_path=_configured_path(
-                "CODEX_BRIDGE_HELPER_PATH",
-                Path(__file__).with_name("hermes_credential_helper.py").resolve(),
-            ),
+            codex_home=_configured_path("CODEX_BRIDGE_CODEX_HOME", Path.home() / ".codex"),
+            credential_python_path=Path(sys.executable),
             client_token_file=_configured_path(
                 "CODEX_BRIDGE_CLIENT_TOKEN_FILE",
                 Path.home() / ".config" / "codex-openai-bridge" / "client-token",
