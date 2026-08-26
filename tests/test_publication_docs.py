@@ -9,6 +9,11 @@ README = ROOT / "README.md"
 README_JA = ROOT / "README.ja.md"
 SECURITY = ROOT / "SECURITY.md"
 LICENSE = ROOT / "LICENSE"
+CONTRIBUTING = ROOT / "CONTRIBUTING.md"
+CONTRIBUTING_JA = ROOT / "CONTRIBUTING.ja.md"
+ISSUE_TEMPLATES = ROOT / ".github" / "ISSUE_TEMPLATE"
+PULL_REQUEST_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
+CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
 
 
 def test_publication_policy_is_explicit_and_bilingual() -> None:
@@ -252,3 +257,154 @@ def test_mit_license_notice_does_not_claim_service_rights() -> None:
     assert "MIT License" in LICENSE.read_text(encoding="utf-8")
     english = README.read_text(encoding="utf-8")
     assert "does not grant rights to access or redistribute OpenAI services" in english
+
+
+def test_contribution_acceptance_policy_and_forms_are_explicit() -> None:
+    english = CONTRIBUTING.read_text(encoding="utf-8")
+    japanese = CONTRIBUTING_JA.read_text(encoding="utf-8")
+    normalized_english = " ".join(english.split())
+    normalized_japanese = " ".join(japanese.split())
+    readme = README.read_text(encoding="utf-8")
+    readme_ja = README_JA.read_text(encoding="utf-8")
+
+    assert "[日本語](CONTRIBUTING.ja.md)" in english
+    assert "[English (canonical)](CONTRIBUTING.md)" in japanese
+    assert "[Contributing](CONTRIBUTING.md)" in readme
+    assert "[貢献ガイド](CONTRIBUTING.ja.md)" in readme_ja
+
+    for required in (
+        "Bug reports and narrowly scoped pull requests are welcome",
+        "No response, review, merge, or release timeline is guaranteed",
+        "Non-trivial external changes require an open issue with the `scope-approved` label",
+        "comment on the issue before starting",
+        (
+            "Typos, broken links, and obviously incorrect documentation examples may be "
+            "submitted directly"
+        ),
+        "A concrete consumer need",
+        "Live acceptance by the Codex backend",
+        "Meaningful OpenAI-compatible behavior",
+        "bounded, stateless, server-owned",
+        "A RED → GREEN fail-closed contract",
+        "API-key authentication or fallback",
+        "Do not include credentials, access tokens, account IDs, real prompts",
+        "AI-assisted contributions are allowed",
+        "Only report checks that you actually ran",
+        "Security vulnerabilities must be reported privately",
+        "Small documentation-only exceptions may omit the approved issue",
+        "baseline local gates",
+        "GitHub CI additionally runs",
+        "Contract test with OpenAI SDK 3.1.0",
+        "Consumer contract with LangChain 1.5.1",
+        "Issue and pull request descriptions may be written in English or Japanese",
+    ):
+        assert required in normalized_english
+
+    for required in (
+        "bug reportと範囲を限定したpull requestを歓迎します",
+        "応答、review、merge、release時期を保証しません",
+        "non-trivialな外部貢献には`scope-approved` label付きのopen issueが必要です",
+        "着手前にissueへcomment",
+        "typo、broken link、明白に誤ったdocumentation exampleは直接PR可能です",
+        "具体的なconsumer上の必要性",
+        "Codex backendが実際に受理",
+        "OpenAI互換として意味のある挙動",
+        "bounded、stateless、server-owned",
+        "RED → GREENのfail-closed contract",
+        "API key認証またはfallback",
+        "credential、access token、account ID、実prompt",
+        "AI-assisted contributionを許可します",
+        "実際に実行したcheckだけを報告",
+        "security vulnerabilityはprivateに報告",
+        "小さなdocumentation-only例外では承認済みissueを省略できます",
+        "baseline local gate",
+        "GitHub CIでは追加で",
+        "OpenAI SDK 3.1.0 contract",
+        "LangChain 1.5.1 consumer contract",
+        "issueとPRのdescriptionは英語または日本語",
+    ):
+        assert required in normalized_japanese
+
+    forms = {
+        "bug_report.yml": (
+            "Bug report",
+            "Affected revision",
+            "Sanitized reproduction",
+            "Expected behavior",
+            "Observed sanitized behavior",
+            "I removed credentials, tokens, account IDs, prompts, tool arguments, reasoning data",
+        ),
+        "compatibility_report.yml": (
+            "Consumer compatibility report",
+            "Consumer and exact version",
+            "Bridge endpoint and mode",
+            "Generated request shape or minimal synthetic reproducer",
+            "Evidence level requested",
+            "This report does not claim support beyond the evidence provided",
+        ),
+        "feature_request.yml": (
+            "Scoped feature request",
+            "Concrete consumer need",
+            "Codex backend evidence",
+            "Proposed bounded public contract",
+            "Fail-closed rejection cases",
+            (
+                "I understand API-key, multi-provider, multi-account, and hosted-service "
+                "expansion is out of scope"
+            ),
+            (
+                "I removed credentials, tokens, account IDs, prompts, tool arguments, "
+                "reasoning data, and raw upstream responses"
+            ),
+        ),
+        "question.yml": (
+            "Usage question",
+            "Question",
+            "What I already checked",
+            "I removed all credentials and sensitive request data",
+        ),
+        "security_contact.yml": (
+            "Private security contact request",
+            "Do not include vulnerability details",
+            "Private reporting is unavailable to me",
+            (
+                "I included no exploit details, credentials, tokens, account IDs, prompts, "
+                "tool arguments, reasoning data, or raw upstream responses"
+            ),
+            "Requested private contact method",
+        ),
+    }
+    for name, required_values in forms.items():
+        text = (ISSUE_TEMPLATES / name).read_text(encoding="utf-8")
+        assert "Reports may be written in English or Japanese." in text
+        for required in required_values:
+            assert required in text
+
+    config = (ISSUE_TEMPLATES / "config.yml").read_text(encoding="utf-8")
+    assert "blank_issues_enabled: false" in config
+    assert "security/advisories/new" in config
+    assert "Private vulnerability report" in config
+    assert (ISSUE_TEMPLATES / "security_contact.yml").exists()
+
+    pull_request = PULL_REQUEST_TEMPLATE.read_text(encoding="utf-8")
+    for required in (
+        "## Linked issue",
+        "Fixes #",
+        "`scope-approved`",
+        "## Evidence",
+        "RED failure",
+        "GREEN command and result",
+        "I ran every check claimed above",
+        "baseline local gates",
+        "version-isolated CI consumer matrix",
+        "No credential, token, account ID, prompt, tool argument, reasoning data",
+        (
+            "I did not add API-key authentication, provider fallback, multi-account, or "
+            "hosted-service behavior"
+        ),
+        "Support wording is no stronger than the supplied contract, live, or operational evidence",
+        "Descriptions and comments may be written in English or Japanese",
+    ):
+        assert required in pull_request
+
+    assert CODEOWNERS.read_text(encoding="utf-8") == "* @itmst71\n"

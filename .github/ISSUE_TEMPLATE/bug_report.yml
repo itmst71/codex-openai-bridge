@@ -1,0 +1,82 @@
+name: Bug report
+description: Report a reproducible bridge defect with sanitized evidence
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Use synthetic inputs and never include credentials,
+        tokens, account IDs, prompts, tool arguments, reasoning data, or raw upstream responses.
+        Reports may be written in English or Japanese.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched open and closed issues and pull requests for duplicates.
+          required: true
+        - label: I reproduced this on the latest `main` or identified the exact affected revision.
+          required: true
+        - label: I removed credentials, tokens, account IDs, prompts, tool arguments, reasoning data, and raw upstream responses.
+          required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Affected revision
+      description: Exact bridge commit SHA or release identifier
+      placeholder: 40-character commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, Codex CLI version, and consumer version
+      placeholder: Ubuntu 24.04; Python 3.12.x; Codex CLI 0.146.0; OpenAI SDK 3.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: endpoint
+    attributes:
+      label: Bridge endpoint and mode
+      options:
+        - Chat Completions non-stream
+        - Chat Completions stream
+        - Responses non-stream
+        - Responses stream
+        - Health / readiness / models
+        - Credential setup or refresh
+        - Documentation or packaging
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Sanitized reproduction
+      description: Minimal synthetic steps or code that reproduces the behavior
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed sanitized behavior
+      description: Include only status, sanitized error code, counts, and bounded structure
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Verification evidence
+      description: Exact commands run and their sanitized results; say explicitly if not run
+    validations:
+      required: true

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private vulnerability report
+    url: https://github.com/itmst71/codex-openai-bridge/security/advisories/new
+    about: Report vulnerabilities privately; never publish exploit details or credentials.
+  - name: Contribution policy
+    url: https://github.com/itmst71/codex-openai-bridge/blob/main/CONTRIBUTING.md
+    about: Check accepted scope, evidence requirements, and the issue-first workflow.

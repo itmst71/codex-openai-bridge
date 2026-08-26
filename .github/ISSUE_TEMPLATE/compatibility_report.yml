@@ -1,0 +1,91 @@
+name: Consumer compatibility report
+description: Report a version-scoped OpenAI-compatible consumer integration result
+title: "[Compatibility]: "
+labels:
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Compatibility claims are evidence-bounded. A deterministic serializer fixture is not a
+        live or operational support claim. Never include real credentials or request content.
+        Reports may be written in English or Japanese.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched open and closed issues and pull requests for this consumer and version.
+          required: true
+        - label: I used synthetic inputs and removed all credentials and sensitive request data.
+          required: true
+        - label: This report does not claim support beyond the evidence provided.
+          required: true
+  - type: input
+    id: consumer
+    attributes:
+      label: Consumer and exact version
+      placeholder: langchain-openai 1.6.0; OpenAI SDK 3.3.1
+    validations:
+      required: true
+  - type: input
+    id: bridge
+    attributes:
+      label: Bridge revision
+      placeholder: 40-character commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: endpoint
+    attributes:
+      label: Bridge endpoint and mode
+      options:
+        - Chat Completions non-stream
+        - Chat Completions stream
+        - Responses non-stream
+        - Responses stream
+        - Multiple modes
+    validations:
+      required: true
+  - type: dropdown
+    id: evidence_level
+    attributes:
+      label: Evidence level requested
+      description: Choose the strongest level actually supported by the supplied evidence
+      options:
+        - Contract verified
+        - Live verified
+        - Operationally verified
+        - Failure / incompatibility report
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: Generated request shape or minimal synthetic reproducer
+      description: Omit authorization, account identifiers, prompts, responses, and reasoning content
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Sanitized result
+      description: Status, error code, event types, tool counts, and terminal-state checks
+    validations:
+      required: true
+  - type: textarea
+    id: conditions
+    attributes:
+      label: Required configuration and unverified boundaries
+      description: Record adapters, disabled features, version pins, and surfaces not exercised
+    validations:
+      required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: Exact verification commands
+      description: Include only commands that were actually run and sanitized result summaries
+      render: shell
+    validations:
+      required: true

@@ -696,6 +696,13 @@ unset CODEX_BRIDGE_BASE_URL CODEX_BRIDGE_CLIENT_TOKEN
 
 credential values を bug reports、test logs、shell transcripts、review prompts に含めないでください。
 
+## 貢献
+
+Issue-firstかつevidence-boundedな手順で、bug reportと範囲を限定したPRを受け付けます。詳細は
+[貢献ガイド](CONTRIBUTING.ja.md)を確認してください。Non-trivialな外部貢献は実装前に
+`scope-approved`付きissueが必要です。小さなtypo、broken link、明白に誤ったdocumentationの修正は
+直接PR可能です。このprojectはbest-effortでmaintainし、応答またはmergeのSLAはありません。
+
 ## セキュリティ
 
 デプロイ前に、前述の loopback-only threat model を確認してください。脆弱性は [SECURITY.md](SECURITY.md) に記載された手順で報告し、credentials や sensitive request data を public issue に記載しないでください。

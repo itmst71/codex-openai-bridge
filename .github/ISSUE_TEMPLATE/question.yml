@@ -1,0 +1,42 @@
+name: Usage question
+description: Ask a scoped setup or behavior question after checking the documentation
+title: "[Question]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is maintained on a best-effort basis and has no support SLA. Do not use this
+        form for vulnerabilities or include credentials, account IDs, prompts, tool arguments,
+        reasoning data, or raw upstream responses.
+        Reports may be written in English or Japanese.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I checked the README, SECURITY.md, and open and closed issues.
+          required: true
+        - label: I removed all credentials and sensitive request data.
+          required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+  - type: textarea
+    id: checked
+    attributes:
+      label: What I already checked
+      description: Documentation sections and sanitized commands already tried
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Bridge revision and environment
+      placeholder: commit SHA; OS; Python; Codex CLI version
+    validations:
+      required: true

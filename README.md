@@ -803,6 +803,13 @@ unset CODEX_BRIDGE_BASE_URL CODEX_BRIDGE_CLIENT_TOKEN
 
 Never include credential values in bug reports, test logs, shell transcripts, or review prompts.
 
+## Contributing
+
+Bug reports and narrowly scoped pull requests are welcome under the issue-first, evidence-bounded
+process in [Contributing](CONTRIBUTING.md). Non-trivial external work requires a `scope-approved` issue
+before implementation; small typo, broken-link, and obviously incorrect documentation fixes may be
+submitted directly. The project is maintained on a best-effort basis with no response or merge SLA.
+
 ## Security
 
 Review the loopback-only threat model above before deployment. Report vulnerabilities using

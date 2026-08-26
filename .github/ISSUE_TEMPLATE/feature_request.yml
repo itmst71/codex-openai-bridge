@@ -1,0 +1,68 @@
+name: Scoped feature request
+description: Propose a bounded capability that fits the Codex-backed bridge scope
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Open an issue and wait for the `scope-approved` label before implementing a non-trivial
+        change. The bridge does not expand into API-key, multi-provider, multi-account, hosted,
+        stateful, or capability-emulation roles.
+        Reports may be written in English or Japanese.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Scope checks
+      options:
+        - label: I searched open and closed issues and pull requests for this request.
+          required: true
+        - label: I understand API-key, multi-provider, multi-account, and hosted-service expansion is out of scope.
+          required: true
+        - label: I will wait for `scope-approved` before implementing a non-trivial change.
+          required: true
+        - label: I removed credentials, tokens, account IDs, prompts, tool arguments, reasoning data, and raw upstream responses.
+          required: true
+  - type: textarea
+    id: consumer_need
+    attributes:
+      label: Concrete consumer need
+      description: Name the exact consumer, version, and blocked workflow
+    validations:
+      required: true
+  - type: textarea
+    id: codex_evidence
+    attributes:
+      label: Codex backend evidence
+      description: Explain or demonstrate why the real backend supports this behavior; use synthetic data
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Proposed bounded public contract
+      description: Accepted request/response surface, exact versions, ownership, and resource limits
+    validations:
+      required: true
+  - type: textarea
+    id: rejection
+    attributes:
+      label: Fail-closed rejection cases
+      description: Malformed, ambiguous, unsupported, and over-limit cases that must be rejected
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include consumer-side configuration or using another provider outside this bridge
+    validations:
+      required: true
+  - type: textarea
+    id: evidence_plan
+    attributes:
+      label: RED → GREEN evidence plan
+      description: Focused contract test, live proof if applicable, and full regression gates
+    validations:
+      required: true
