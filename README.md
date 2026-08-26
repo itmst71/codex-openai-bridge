@@ -13,6 +13,17 @@ A bounded, loopback-only OpenAI-compatible HTTP bridge for the Codex Responses b
 
 This project is an independent translation service. It does **not** run the Hermes agent loop, system prompt, memory, or tools.
 
+## Prerequisites
+
+The current release requires the Hermes-internal Codex credential resolver on the bridge host.
+Consumers do not require Hermes; only the bridge process uses that credential boundary.
+Official Codex CLI authentication is the intended replacement but is not supported by this release. This
+dependency is temporary and is being removed in favor of the official `codex login` flow.
+
+API-key authentication is not a project goal. If you have an OpenAI API key,
+use the official OpenAI API directly without this bridge. This project remains specific to the ChatGPT/Codex OAuth
+backend and will not add an API-key fallback or provider switch.
+
 ## Intended use and service terms
 
 This repository is intended for personal, single-user, local experimentation. It publishes

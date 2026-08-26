@@ -48,6 +48,34 @@ def test_publication_policy_is_explicit_and_bilingual() -> None:
         assert required in japanese
 
 
+def test_authentication_prerequisites_are_explicit_and_bilingual() -> None:
+    english = README.read_text(encoding="utf-8")
+    japanese = README_JA.read_text(encoding="utf-8")
+
+    for required in (
+        "## Prerequisites",
+        "current release requires the Hermes-internal Codex credential resolver",
+        "Consumers do not require Hermes",
+        (
+            "Official Codex CLI authentication is the intended replacement but is not "
+            "supported by this release"
+        ),
+        "API-key authentication is not a project goal",
+        "use the official OpenAI API directly without this bridge",
+    ):
+        assert required in english
+
+    for required in (
+        "## 前提条件",
+        "現行releaseはHermes内部のCodex credential resolverを必要とします",
+        "consumer側にHermesは不要です",
+        "公式Codex CLI認証が移行先ですが、このreleaseではまだ対応していません",
+        "API key認証はこのprojectの目標ではありません",
+        "このbridgeを使わず公式OpenAI APIへ直接接続してください",
+    ):
+        assert required in japanese
+
+
 def test_consumer_status_taxonomy_distinguishes_evidence_levels() -> None:
     english = README.read_text(encoding="utf-8")
     japanese = README_JA.read_text(encoding="utf-8")

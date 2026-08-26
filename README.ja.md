@@ -12,6 +12,17 @@ Codex Responses backend のための、処理範囲を制限した loopback 専�
 
 このプロジェクトは独立した変換サービスです。Hermes の agent loop、system prompt、memory、tools は実行**しません**。
 
+## 前提条件
+
+現行releaseはHermes内部のCodex credential resolverを必要とします。これはbridge host側だけの
+依存であり、consumer側にHermesは不要です。
+公式Codex CLI認証が移行先ですが、このreleaseではまだ対応していません。
+この依存は一時的なものであり、公式`codex login` flowへ置き換える予定です。
+
+API key認証はこのprojectの目標ではありません。OpenAI API keyを利用する場合は、
+このbridgeを使わず公式OpenAI APIへ直接接続してください。このprojectはChatGPT/Codex OAuth backend専用を
+維持し、API key fallbackやprovider切替は追加しません。
+
 ## 想定用途とサービス利用条件
 
 このrepositoryは、個人・単一ユーザー・ローカルでの実験用途を想定しています。処理範囲を
