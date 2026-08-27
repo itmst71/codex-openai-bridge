@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/downloads/)
 
-A bounded, loopback-only OpenAI-compatible HTTP bridge for the Codex Responses backend. It lets consumers such as the OpenAI Python SDK, Honcho, LangChain, and the OpenAI Agents SDK use a stable public model alias (`codex`) while keeping the upstream URL, OAuth authorization, account ID, and real model under server control.
+A bounded, loopback-only OpenAI-compatible HTTP bridge for the Codex Responses backend. It lets consumers such as the OpenAI Python SDK, Honcho, LangChain, and the OpenAI Agents SDK select from server-approved aliases while keeping the upstream URL, OAuth authorization, account ID, and real model under server control. The required default alias is `codex`.
 
 This project is an independent translation service. It does **not** run an agent loop, system
 prompt, memory, or tools.
@@ -93,7 +93,7 @@ flowchart TD
     bridge -->|"Strict JSON/SSE boundaries<br/>OpenAI ↔ Responses translation"| upstream
 ```
 
-The public model name is always `codex`. The bridge reconstructs the upstream model, URL, authorization, account, `store:false`, streaming policy, and encrypted-reasoning include policy from trusted server-side state.
+The bridge exposes only server-approved aliases. It reconstructs the real upstream model, URL, authorization, account, `store:false`, streaming policy, and encrypted-reasoning include policy from trusted server-side state. Real upstream model identifiers are never returned by `/v1/models`, Chat, Responses, or SSE projections.
 
 ## Supported and unsupported
 
@@ -101,7 +101,7 @@ The public model name is always `codex`. The bridge reconstructs the upstream mo
 | --- | --- |
 | `GET /healthz` | Supported; process liveness only |
 | `GET /readyz` | Supported; bounded credential readiness |
-| `GET /v1/models` | Supported; lists only `codex` |
+| `GET /v1/models` | Supported; lists only configured public aliases, with `codex` first |
 | `POST /v1/chat/completions` | Supported, including SSE streaming |
 | `POST /v1/responses` | Supported for the live-proven stateless subset, including named Responses SSE events |
 | Function tools and tool history | Supported with strict identity and call/output pairing checks |
@@ -115,7 +115,8 @@ The public model name is always `codex`. The bridge reconstructs the upstream mo
 | `POST /v1/embeddings` | **Embeddings are not supported**; returns a sanitized unsupported error |
 | `previous_response_id`, conversations, and stored response retrieval | Unsupported; the bridge remains stateless and forces `store:false` |
 | Local shell, web search, computer use, MCP, hosted tools, and image input | Unsupported and rejected; no capability is emulated |
-| Client-selected upstream URL/model/account/auth policy | Unsupported and ignored/rejected |
+| Client-selected public model alias | Supported only for aliases configured by the server operator |
+| Client-selected real upstream URL/model/account/auth policy | Unsupported and rejected |
 | Automatic retry of 429, 5xx, timeout, or interrupted generation | Unsupported; only one exact credential refresh/replay after upstream 401 |
 
 The bridge does not claim OpenAI Developer API SLA equivalence, embedding support, or permanent permission to use a ChatGPT/Codex subscription as a service backend. Confirm applicable product terms and operational limits before sustained deployment.
@@ -147,7 +148,7 @@ flowchart LR
 
 The currently supported direct Responses request controls are:
 
-- fixed public `model="codex"`, text `input`, and bounded user/developer/assistant message items;
+- one configured public model alias, text `input`, and bounded user/developer/assistant message items;
 - `instructions`;
 - `reasoning.effort`: `none`, `low`, `medium`, `high`, `xhigh`, or `max`;
 - `reasoning.summary`: `auto`, `concise`, or `detailed`;
@@ -220,7 +221,9 @@ The service reads validated environment variables. Important settings and defaul
 | `CODEX_BRIDGE_HOST` | `127.0.0.1` | Must be an IPv4 or IPv6 loopback address |
 | `CODEX_BRIDGE_PORT` | `8646` | TCP port 1–65535 |
 | `CODEX_BRIDGE_CLIENT_TOKEN_FILE` | `~/.config/codex-openai-bridge/client-token` | Absolute path; owner, regular file, mode `0600` |
-| `CODEX_BRIDGE_UPSTREAM_MODEL` | project default | Canonical server-owned model identifier |
+| `CODEX_BRIDGE_CONTINUATION_KEY_FILE` | `~/.config/codex-openai-bridge/continuation-key` | Server-only continuation signing key; never give it to clients |
+| `CODEX_BRIDGE_MODEL_CONFIG_FILE` | `~/.config/codex-openai-bridge/models.toml` when present | Optional absolute path to the owner-controlled alias map |
+| `CODEX_BRIDGE_UPSTREAM_MODEL` | project default | Legacy single-alias model; rejected when a model map is present |
 | `CODEX_BRIDGE_CODEX_PATH` | `$HOME/.local/bin/codex` | Absolute path to the official Codex CLI executable |
 | `CODEX_BRIDGE_CODEX_HOME` | `$HOME/.codex` | Absolute Codex CLI home containing file-mode `auth.json` |
 | `CODEX_BRIDGE_MAX_IN_FLIGHT` | `2` | Bounded concurrent owners, maximum 10 |
@@ -228,6 +231,32 @@ The service reads validated environment variables. Important settings and defaul
 | `CODEX_BRIDGE_TOTAL_REQUEST_DEADLINE_SECONDS` | `240` | Whole request, including downstream writes |
 
 Additional `CODEX_BRIDGE_MAX_*` and timeout variables are strictly bounded in `config.py`. Invalid, noncanonical, non-loopback, or inconsistent settings fail startup.
+
+### Server-owned model aliases
+
+Copy the example to enable more than the required `codex` alias:
+
+```bash
+install -d -m 700 "$HOME/.config/codex-openai-bridge"
+install -m 600 deploy/models.toml.example \
+  "$HOME/.config/codex-openai-bridge/models.toml"
+```
+
+```toml
+version = 1
+
+[models]
+codex = "gpt-5.6-terra"
+codex-sol = "gpt-5.6-sol"
+```
+
+The left side contains server-approved aliases accepted from clients. The right side contains real upstream model identifiers and remains server-owned. `codex` is mandatory, at most 16 aliases are accepted, and unknown keys, malformed identifiers, symlinks, hard links, unstable reads, or group/world-writable path authority fail startup. `CODEX_BRIDGE_MODEL_CONFIG_FILE` may select another absolute path. A map and `CODEX_BRIDGE_UPSTREAM_MODEL` are conflicting authorities and cannot be combined.
+
+The map is loaded once and frozen. After editing it, restart the bridge; an in-flight request cannot observe a changed mapping. Changing the real model behind an existing alias intentionally invalidates prior continuation state fail-closed. `/v1/models` returns `codex` first and the remaining aliases in lexical order. Responses report the client-selected alias; real upstream model identifiers are never returned.
+
+Use the same alias for the complete tool, reasoning, or compaction continuation. Signed public continuation IDs and opaque-state envelopes bind both the selected alias and its configured real model, and cross-alias continuation is rejected before upstream access. Finish active legacy single-alias chains before enabling a model map. To change models, finish the current chain or start a fresh chain with explicit public-text handoff.
+
+These operator-defined aliases are not project support claims. Before assigning an alias to production work, independently live-verify that real model for every Chat, Responses, streaming, structured-output, tool, reasoning, and compaction surface that will use it.
 
 The checked-in user unit intentionally contains no `EnvironmentFile=` and no secret. For non-secret overrides, use a user-unit drop-in:
 
@@ -251,7 +280,23 @@ umask 077
 chmod 600 "$HOME/.config/codex-openai-bridge/client-token"
 ```
 
-Keep consumer configuration pointed at the file or inject its value through that consumer's secret mechanism. Never place the value in the repository, unit, journal, or command history.
+Generate a second independent 43-character server-only continuation signing key. It must differ from the bridge client token and must never be sent as an API credential:
+
+```bash
+umask 077
+"$HOME/src/codex-openai-bridge/.venv/bin/python" -c \
+  'import secrets,sys; sys.stdout.write(secrets.token_urlsafe(32) + "\n")' \
+  > "$HOME/.config/codex-openai-bridge/continuation-key"
+chmod 600 "$HOME/.config/codex-openai-bridge/continuation-key"
+if cmp -s \
+  "$HOME/.config/codex-openai-bridge/client-token" \
+  "$HOME/.config/codex-openai-bridge/continuation-key"; then
+  rm -f "$HOME/.config/codex-openai-bridge/continuation-key"
+  exit 1
+fi
+```
+
+Point consumer configuration only at `client-token` or inject that value through the consumer's secret mechanism. Never expose `continuation-key` to a consumer. Never place either value in the repository, unit, journal, or command history.
 
 ## Deploy the systemd user service
 
@@ -754,11 +799,14 @@ Keep `max_retries=0`: ambiguous automatic generation retries can duplicate outpu
 
 ## Upgrade and rollback
 
+Before upgrading, finish every active tool or reasoning chain. Older no-map releases produced `cobr_r2_` Chat reasoning details signed with the client token. This revision deliberately does not accept that client-mintable authority. If a chain cannot be completed before the cutover, start a fresh chain after the upgrade instead of replaying its old opaque reasoning state.
+
 1. Record the currently deployed Git revision without recording credentials.
-2. Stop the user service and confirm its listener is gone.
-3. Update the checkout to the reviewed revision.
-4. Run `uv sync --locked`, the full test/type/lint gates, and `systemd-analyze --user verify`.
-5. Reinstall the unit, run `systemctl --user daemon-reload`, then start and verify health/readiness/listener ownership.
+2. Generate and verify `continuation-key` before starting the reviewed revision. It must be an owner-controlled regular file with mode `0600`, one link, and a value that differs from `client-token`; use the generation block in **Configuration** above.
+3. Stop the user service and confirm its listener is gone.
+4. Update the checkout to the reviewed revision.
+5. Run `uv sync --locked`, the full test/type/lint gates, and `systemd-analyze --user verify`.
+6. Reinstall the unit, run `systemctl --user daemon-reload`, then start and verify health/readiness/listener ownership.
 
 ```bash
 cd "$HOME/src/codex-openai-bridge"
@@ -772,7 +820,7 @@ systemctl --user daemon-reload
 systemctl --user start codex-openai-bridge.service
 ```
 
-For rollback, repeat the same bounded procedure with the previously recorded reviewed revision and its matching lockfile/unit. Do not mix source, lockfile, virtual environment, and unit definitions from different revisions. The bridge client token and official Codex CLI authentication state are not part of a Git rollback.
+Before rollback, finish active chains created by the newer revision or plan to start a fresh chain after rollback; signed reasoning or continuation state is not portable across this signing-authority boundary. Then repeat the same bounded procedure with the previously recorded reviewed revision and its matching lockfile/unit. Do not mix source, lockfile, virtual environment, and unit definitions from different revisions. The bridge client token, server-only continuation key, and official Codex CLI authentication state are not part of a Git rollback.
 
 ## Opt-in live tests
 

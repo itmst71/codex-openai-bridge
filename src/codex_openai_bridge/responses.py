@@ -9,6 +9,13 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from codex_openai_bridge.continuation import (
+    ContinuationError,
+    decode_continuation_id,
+    decode_continuation_state,
+    encode_continuation_id,
+    encode_continuation_state,
+)
 from codex_openai_bridge.translation import UpstreamResponseError
 from codex_openai_bridge.wire import (
     ChatRequestError,
@@ -75,6 +82,7 @@ class NamedCustomToolChoice:
 class ResponsesRequest:
     """The closed public Responses request contract."""
 
+    model: str
     input: str | tuple[dict[str, Any], ...]
     instructions: str | None
     reasoning: ReasoningConfig | None
@@ -157,6 +165,147 @@ def _identifier(value: object, *, upstream: bool = False) -> str:
     if upstream:
         raise UpstreamResponseError("invalid upstream response")
     raise _invalid_request()
+
+
+def _model_scoped_call_id(
+    value: object,
+    *,
+    public_model: str,
+    binding_key: str | None,
+    model_scoped: bool,
+) -> str:
+    if not model_scoped:
+        return _identifier(value)
+    if binding_key is None:
+        raise _invalid_request()
+    try:
+        return decode_continuation_id(
+            value,
+            public_model=public_model,
+            kind="responses_call",
+            binding_key=binding_key,
+            allow_legacy=False,
+        )
+    except ContinuationError:
+        raise _invalid_request() from None
+
+
+def _public_model_scoped_call_id(
+    raw_id: str,
+    *,
+    public_model: str,
+    binding_key: str | None,
+    model_scoped: bool,
+) -> str:
+    if not model_scoped:
+        return raw_id
+    if binding_key is None:
+        raise UpstreamResponseError("invalid upstream response")
+    try:
+        return encode_continuation_id(
+            raw_id=raw_id,
+            public_model=public_model,
+            kind="responses_call",
+            binding_key=binding_key,
+        )
+    except ContinuationError:
+        raise UpstreamResponseError("invalid upstream response") from None
+
+
+def _model_scoped_state_id(
+    value: object,
+    *,
+    public_model: str,
+    kind: str,
+    binding_key: str | None,
+    model_scoped: bool,
+) -> str:
+    if not model_scoped:
+        return _identifier(value)
+    if binding_key is None:
+        raise _invalid_request()
+    try:
+        return decode_continuation_id(
+            value,
+            public_model=public_model,
+            kind=kind,
+            binding_key=binding_key,
+            allow_legacy=False,
+        )
+    except ContinuationError:
+        raise _invalid_request() from None
+
+
+def _public_model_scoped_state_id(
+    raw_id: str,
+    *,
+    public_model: str,
+    kind: str,
+    binding_key: str | None,
+    model_scoped: bool,
+) -> str:
+    if not model_scoped:
+        return raw_id
+    if binding_key is None:
+        raise UpstreamResponseError("invalid upstream response")
+    try:
+        return encode_continuation_id(
+            raw_id=raw_id,
+            public_model=public_model,
+            kind=kind,
+            binding_key=binding_key,
+        )
+    except ContinuationError:
+        raise UpstreamResponseError("invalid upstream response") from None
+
+
+def _model_scoped_encrypted_state(
+    value: object,
+    *,
+    public_model: str,
+    kind: str,
+    binding_key: str | None,
+    max_string_bytes: int,
+    model_scoped: bool,
+    item_id: str,
+    upstream: bool = False,
+) -> str:
+    if not model_scoped:
+        if type(value) is not str:
+            if upstream:
+                raise UpstreamResponseError("invalid upstream response")
+            raise _invalid_request()
+        return value
+    if binding_key is None:
+        if upstream:
+            raise UpstreamResponseError("invalid upstream response")
+        raise _invalid_request()
+    if type(value) is not str:
+        if upstream:
+            raise UpstreamResponseError("invalid upstream response")
+        raise _invalid_request()
+    try:
+        if upstream:
+            return encode_continuation_state(
+                value,
+                public_model=public_model,
+                kind=kind,
+                binding_key=binding_key,
+                max_value_bytes=max_string_bytes,
+                state=item_id,
+            )
+        return decode_continuation_state(
+            value,
+            public_model=public_model,
+            kind=kind,
+            binding_key=binding_key,
+            max_value_bytes=max_string_bytes,
+            state=item_id,
+        )
+    except ContinuationError:
+        if upstream:
+            raise UpstreamResponseError("invalid upstream response") from None
+        raise _invalid_request() from None
 
 
 def _strict_arguments(
@@ -402,6 +551,9 @@ def _parse_input(
     max_json_depth: int,
     max_json_nodes: int,
     max_string_bytes: int,
+    public_model: str = "codex",
+    binding_key: str | None = None,
+    model_scoped: bool = False,
 ) -> tuple[
     str | tuple[dict[str, Any], ...],
     frozenset[str],
@@ -445,11 +597,9 @@ def _parse_input(
                 raise _invalid_request()
             if output_phase:
                 output_phase = False
-            item_id = _identifier(item["id"])
             summary = item["summary"]
             if (
-                item_id in item_ids
-                or item["status"] != "completed"
+                item["status"] != "completed"
                 or type(summary) is not list
                 or any(
                     type(part) is not dict
@@ -460,10 +610,26 @@ def _parse_input(
                 )
             ):
                 raise _invalid_request()
-            digest = _canonical_reasoning_digest(
-                item["encrypted_content"], max_string_bytes=max_string_bytes
+            item_id = _model_scoped_state_id(
+                item["id"],
+                public_model=public_model,
+                kind="responses_reasoning",
+                binding_key=binding_key,
+                model_scoped=model_scoped,
             )
-            if digest in reasoning_digests:
+            encrypted_content = _model_scoped_encrypted_state(
+                item["encrypted_content"],
+                public_model=public_model,
+                kind="responses_reasoning_state",
+                binding_key=binding_key,
+                max_string_bytes=max_string_bytes,
+                model_scoped=model_scoped,
+                item_id=item_id,
+            )
+            digest = _canonical_reasoning_digest(
+                encrypted_content, max_string_bytes=max_string_bytes
+            )
+            if item_id in item_ids or digest in reasoning_digests:
                 raise _invalid_request()
             encrypted_item_count += 1
             if encrypted_item_count > max_items:
@@ -474,7 +640,7 @@ def _parse_input(
                 {
                     "type": "reasoning",
                     "summary": [{"type": part["type"], "text": part["text"]} for part in summary],
-                    "encrypted_content": item["encrypted_content"],
+                    "encrypted_content": encrypted_content,
                 }
             )
             continue
@@ -496,13 +662,31 @@ def _parse_input(
                 or not set(item) <= {"id", "type", "encrypted_content"}
             ):
                 raise _invalid_request()
+            checkpoint_public_id: object | None = item.get("id")
+            if model_scoped and checkpoint_public_id is None:
+                raise _invalid_request()
             checkpoint_id: str | None = None
-            if "id" in item and item["id"] is not None:
-                checkpoint_id = _identifier(item["id"])
+            if checkpoint_public_id is not None:
+                checkpoint_id = _model_scoped_state_id(
+                    checkpoint_public_id,
+                    public_model=public_model,
+                    kind="responses_compaction",
+                    binding_key=binding_key,
+                    model_scoped=model_scoped,
+                )
                 if checkpoint_id in item_ids:
                     raise _invalid_request()
+            encrypted_content = _model_scoped_encrypted_state(
+                item["encrypted_content"],
+                public_model=public_model,
+                kind="responses_compaction_state",
+                binding_key=binding_key,
+                max_string_bytes=max_string_bytes,
+                model_scoped=model_scoped,
+                item_id=checkpoint_id or "no-id",
+            )
             digest = _canonical_reasoning_digest(
-                item["encrypted_content"], max_string_bytes=max_string_bytes
+                encrypted_content, max_string_bytes=max_string_bytes
             )
             if digest in reasoning_digests:
                 raise _invalid_request()
@@ -513,7 +697,7 @@ def _parse_input(
             reasoning_digests.add(digest)
             translated_compaction: dict[str, Any] = {
                 "type": "compaction",
-                "encrypted_content": item["encrypted_content"],
+                "encrypted_content": encrypted_content,
             }
             if checkpoint_id is not None:
                 item_ids.add(checkpoint_id)
@@ -533,11 +717,22 @@ def _parse_input(
             if "status" in item and item["status"] != "completed":
                 raise _invalid_request()
             if "id" in item:
-                item_id = _identifier(item["id"])
+                item_id = _model_scoped_state_id(
+                    item["id"],
+                    public_model=public_model,
+                    kind="responses_item",
+                    binding_key=binding_key,
+                    model_scoped=model_scoped,
+                )
                 if item_id in item_ids:
                     raise _invalid_request()
                 item_ids.add(item_id)
-            call_id = _identifier(item["call_id"])
+            call_id = _model_scoped_call_id(
+                item["call_id"],
+                public_model=public_model,
+                binding_key=binding_key,
+                model_scoped=model_scoped,
+            )
             name = _identifier(item["name"])
             if call_id in call_ids:
                 raise _invalid_request()
@@ -571,11 +766,18 @@ def _parse_input(
             if "status" in item and item["status"] != "completed":
                 raise _invalid_request()
             if "id" in item:
+                if model_scoped:
+                    raise _invalid_request()
                 item_id = _identifier(item["id"])
                 if item_id in item_ids:
                     raise _invalid_request()
                 item_ids.add(item_id)
-            call_id = _identifier(item["call_id"])
+            call_id = _model_scoped_call_id(
+                item["call_id"],
+                public_model=public_model,
+                binding_key=binding_key,
+                model_scoped=model_scoped,
+            )
             output = item["output"]
             if (
                 type(output) is not str
@@ -601,11 +803,22 @@ def _parse_input(
             ):
                 raise _invalid_request()
             if "id" in item:
-                item_id = _identifier(item["id"])
+                item_id = _model_scoped_state_id(
+                    item["id"],
+                    public_model=public_model,
+                    kind="responses_item",
+                    binding_key=binding_key,
+                    model_scoped=model_scoped,
+                )
                 if item_id in item_ids:
                     raise _invalid_request()
                 item_ids.add(item_id)
-            call_id = _identifier(item["call_id"])
+            call_id = _model_scoped_call_id(
+                item["call_id"],
+                public_model=public_model,
+                binding_key=binding_key,
+                model_scoped=model_scoped,
+            )
             name = _identifier(item["name"])
             tool_input = item["input"]
             if call_id in call_ids or name != custom_tool.name or type(tool_input) is not str:
@@ -632,11 +845,18 @@ def _parse_input(
             ):
                 raise _invalid_request()
             if "id" in item:
+                if model_scoped:
+                    raise _invalid_request()
                 item_id = _identifier(item["id"])
                 if item_id in item_ids:
                     raise _invalid_request()
                 item_ids.add(item_id)
-            call_id = _identifier(item["call_id"])
+            call_id = _model_scoped_call_id(
+                item["call_id"],
+                public_model=public_model,
+                binding_key=binding_key,
+                model_scoped=model_scoped,
+            )
             output = item["output"]
             if (
                 type(output) is not str
@@ -714,7 +934,13 @@ def _parse_input(
                 raise _invalid_request()
             assistant_item_id: str | None = None
             if "id" in item:
-                assistant_item_id = _identifier(item["id"])
+                assistant_item_id = _model_scoped_state_id(
+                    item["id"],
+                    public_model=public_model,
+                    kind="responses_item",
+                    binding_key=binding_key,
+                    model_scoped=model_scoped,
+                )
             content = item["content"]
             status = item["status"]
             phase = item.get("phase")
@@ -770,18 +996,26 @@ def _parse_input(
 def parse_responses_request(
     value: object,
     *,
-    public_model: str,
+    public_model: str | tuple[str, ...],
     max_items: int,
     max_tools: int,
     max_json_depth: int,
     max_json_nodes: int,
     max_string_bytes: int,
+    binding_key: str | None = None,
+    model_scoped: bool | None = None,
 ) -> ResponsesRequest:
     """Parse a direct Responses request without coercion or passthrough fields."""
     if (
         type(value) is not dict
-        or type(public_model) is not str
-        or not public_model
+        or not (
+            (type(public_model) is str and public_model)
+            or (
+                type(public_model) is tuple
+                and public_model
+                and all(type(model) is str and model for model in public_model)
+            )
+        )
         or any(
             type(limit) is not int or limit <= 0
             for limit in (
@@ -820,7 +1054,15 @@ def parse_responses_request(
         max_nodes=max_json_nodes,
         max_string_bytes=max_string_bytes,
     )
-    if type(document["model"]) is not str or document["model"] != public_model:
+    accepted_models = (public_model,) if type(public_model) is str else public_model
+    if type(document["model"]) is not str or document["model"] not in accepted_models:
+        raise _invalid_request()
+    selected_model = document["model"]
+    if model_scoped is None:
+        model_scoped = len(accepted_models) > 1
+    elif type(model_scoped) is not bool:
+        raise _invalid_request()
+    if model_scoped and (type(binding_key) is not str or not binding_key):
         raise _invalid_request()
     if "store" in document and document["store"] is not False:
         raise _invalid_request()
@@ -867,7 +1109,7 @@ def parse_responses_request(
         text_verbosity,
     ) = _parse_options(
         document,
-        public_model=public_model,
+        public_model=selected_model,
         max_tools=max_tools,
         max_json_depth=max_json_depth,
         max_json_nodes=max_json_nodes,
@@ -889,6 +1131,9 @@ def parse_responses_request(
         max_json_depth=max_json_depth,
         max_json_nodes=max_json_nodes,
         max_string_bytes=max_string_bytes,
+        public_model=selected_model,
+        binding_key=binding_key,
+        model_scoped=model_scoped,
     )
     if custom_tool is not None:
         custom_continuation = (
@@ -901,6 +1146,7 @@ def parse_responses_request(
         ):
             raise _invalid_request()
     return ResponsesRequest(
+        model=selected_model,
         input=parsed_input,
         instructions=instructions,
         reasoning=reasoning,
@@ -1136,12 +1382,16 @@ def responses_to_public(
     max_json_depth: int,
     max_json_nodes: int,
     max_string_bytes: int,
+    binding_key: str | None = None,
+    model_scoped: bool = False,
 ) -> dict[str, Any]:
     """Validate and project one completed upstream Responses object."""
     if (
         type(value) is not dict
         or type(public_model) is not str
         or not public_model
+        or type(model_scoped) is not bool
+        or (model_scoped and (type(binding_key) is not str or not binding_key))
         or any(
             type(limit) is not int or limit <= 0
             for limit in (
@@ -1248,11 +1498,26 @@ def responses_to_public(
             reasoning_digests.add(digest)
             public_output.append(
                 {
-                    "id": item_id,
+                    "id": _public_model_scoped_state_id(
+                        item_id,
+                        public_model=public_model,
+                        kind="responses_reasoning",
+                        binding_key=binding_key,
+                        model_scoped=model_scoped,
+                    ),
                     "type": "reasoning",
                     "status": "completed",
                     "summary": [{"type": "summary_text", "text": part["text"]} for part in summary],
-                    "encrypted_content": raw_item["encrypted_content"],
+                    "encrypted_content": _model_scoped_encrypted_state(
+                        raw_item["encrypted_content"],
+                        public_model=public_model,
+                        kind="responses_reasoning_state",
+                        binding_key=binding_key,
+                        max_string_bytes=max_string_bytes,
+                        model_scoped=model_scoped,
+                        item_id=item_id,
+                        upstream=True,
+                    ),
                 }
             )
             continue
@@ -1282,9 +1547,24 @@ def responses_to_public(
             reasoning_digests.add(digest)
             public_output.append(
                 {
-                    "id": item_id,
+                    "id": _public_model_scoped_state_id(
+                        item_id,
+                        public_model=public_model,
+                        kind="responses_compaction",
+                        binding_key=binding_key,
+                        model_scoped=model_scoped,
+                    ),
                     "type": "compaction",
-                    "encrypted_content": raw_item["encrypted_content"],
+                    "encrypted_content": _model_scoped_encrypted_state(
+                        raw_item["encrypted_content"],
+                        public_model=public_model,
+                        kind="responses_compaction_state",
+                        binding_key=binding_key,
+                        max_string_bytes=max_string_bytes,
+                        model_scoped=model_scoped,
+                        item_id=item_id,
+                        upstream=True,
+                    ),
                 }
             )
             continue
@@ -1322,7 +1602,13 @@ def responses_to_public(
                     raise UpstreamResponseError("invalid upstream response")
                 parts.append({"type": "output_text", "text": part["text"], "annotations": []})
             public_message: dict[str, Any] = {
-                "id": item_id,
+                "id": _public_model_scoped_state_id(
+                    item_id,
+                    public_model=public_model,
+                    kind="responses_item",
+                    binding_key=binding_key,
+                    model_scoped=model_scoped,
+                ),
                 "type": "message",
                 "status": "completed",
                 "role": "assistant",
@@ -1367,10 +1653,21 @@ def responses_to_public(
             call_ids.add(call_id)
             public_output.append(
                 {
-                    "id": item_id,
+                    "id": _public_model_scoped_state_id(
+                        item_id,
+                        public_model=public_model,
+                        kind="responses_item",
+                        binding_key=binding_key,
+                        model_scoped=model_scoped,
+                    ),
                     "type": "function_call",
                     "status": "completed",
-                    "call_id": call_id,
+                    "call_id": _public_model_scoped_call_id(
+                        call_id,
+                        public_model=public_model,
+                        binding_key=binding_key,
+                        model_scoped=model_scoped,
+                    ),
                     "name": name,
                     "arguments": arguments,
                 }
@@ -1404,9 +1701,20 @@ def responses_to_public(
             call_ids.add(call_id)
             public_output.append(
                 {
-                    "id": item_id,
+                    "id": _public_model_scoped_state_id(
+                        item_id,
+                        public_model=public_model,
+                        kind="responses_item",
+                        binding_key=binding_key,
+                        model_scoped=model_scoped,
+                    ),
                     "type": "custom_tool_call",
-                    "call_id": call_id,
+                    "call_id": _public_model_scoped_call_id(
+                        call_id,
+                        public_model=public_model,
+                        binding_key=binding_key,
+                        model_scoped=model_scoped,
+                    ),
                     "name": name,
                     "input": tool_input,
                 }

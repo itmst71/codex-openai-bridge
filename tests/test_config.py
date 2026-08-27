@@ -1,9 +1,12 @@
+import os
 import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
+import codex_openai_bridge.model_config as model_config_module
 from codex_openai_bridge.config import ConfigError, Settings
 
 MIB = 1024 * 1024
@@ -87,6 +90,220 @@ def test_accepts_canonical_upstream_model_override(
     assert Settings.from_env().upstream_model == "gpt-5.6-codex"
 
 
+def test_loads_owner_controlled_model_alias_map(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "models.toml"
+    config.write_text(
+        'version = 1\n\n[models]\ncodex = "gpt-5.6-terra"\ncodex-sol = "gpt-5.6-sol"\n',
+        encoding="utf-8",
+    )
+    config.chmod(0o600)
+    monkeypatch.setenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", str(config))
+    monkeypatch.delenv("CODEX_BRIDGE_UPSTREAM_MODEL", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.model_config_file == config
+    assert settings.public_models == ("codex", "codex-sol")
+    assert settings.model_map == MappingProxyType(
+        {"codex": "gpt-5.6-terra", "codex-sol": "gpt-5.6-sol"}
+    )
+    assert settings.resolve_upstream_model("codex-sol") == "gpt-5.6-sol"
+    assert settings.resolve_upstream_model("missing") is None
+
+
+def test_model_map_reader_handles_bounded_short_regular_file_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _model_config(
+        tmp_path,
+        'version = 1\n[models]\ncodex = "gpt-5.6-terra"\ncodex-sol = "gpt-5.6-sol"\n',
+    )
+    original_read = os.read
+
+    def short_read(descriptor: int, count: int) -> bytes:
+        return original_read(descriptor, min(count, 7))
+
+    monkeypatch.setattr(os, "read", short_read)
+    monkeypatch.setenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", str(config))
+
+    assert Settings.from_env().public_models == ("codex", "codex-sol")
+
+
+def _model_config(tmp_path: Path, text: str, *, mode: int = 0o600) -> Path:
+    path = tmp_path / "models.toml"
+    path.write_text(text, encoding="utf-8")
+    path.chmod(mode)
+    return path
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        'version = 2\n[models]\ncodex = "gpt-5.6-terra"\n',
+        'version = true\n[models]\ncodex = "gpt-5.6-terra"\n',
+        'version = 1\nextra = true\n[models]\ncodex = "gpt-5.6-terra"\n',
+        'version = 1\n[models]\nother = "gpt-5.6-terra"\n',
+        'version = 1\n[models]\ncodex = "gpt model"\n',
+        'version = 1\n[models]\ncodex = "gpt-5.6-terra"\ncodex = "gpt-5.6-sol"\n',
+    ],
+)
+def test_rejects_closed_model_map_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    text: str,
+) -> None:
+    path = _model_config(tmp_path, text)
+    monkeypatch.setenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", str(path))
+    monkeypatch.delenv("CODEX_BRIDGE_UPSTREAM_MODEL", raising=False)
+
+    with pytest.raises(ConfigError, match="model configuration"):
+        Settings.from_env()
+
+
+def test_rejects_model_map_and_legacy_model_authority_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = _model_config(tmp_path, 'version = 1\n[models]\ncodex = "gpt-5.6-terra"\n')
+    monkeypatch.setenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", str(path))
+    monkeypatch.setenv("CODEX_BRIDGE_UPSTREAM_MODEL", "gpt-5.6-sol")
+
+    with pytest.raises(ConfigError, match="conflicts"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize("mode", [0o620, 0o602, 0o666])
+def test_rejects_writable_model_map(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: int,
+) -> None:
+    path = _model_config(
+        tmp_path,
+        'version = 1\n[models]\ncodex = "gpt-5.6-terra"\n',
+        mode=mode,
+    )
+    monkeypatch.setenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", str(path))
+
+    with pytest.raises(ConfigError, match="model configuration"):
+        Settings.from_env()
+
+
+def test_rejects_model_map_symlink_and_hardlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = _model_config(tmp_path, 'version = 1\n[models]\ncodex = "gpt-5.6-terra"\n')
+    symlink = tmp_path / "map-link.toml"
+    symlink.symlink_to(target)
+    monkeypatch.setenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", str(symlink))
+    with pytest.raises(ConfigError, match="model configuration"):
+        Settings.from_env()
+
+    hardlink = tmp_path / "map-hardlink.toml"
+    os.link(target, hardlink)
+    monkeypatch.setenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", str(hardlink))
+    with pytest.raises(ConfigError, match="model configuration"):
+        Settings.from_env()
+
+
+def test_default_model_map_dangling_symlink_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".config" / "codex-openai-bridge"
+    config_dir.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    (home / ".config").chmod(0o700)
+    (config_dir / "models.toml").symlink_to(config_dir / "missing.toml")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", raising=False)
+
+    with pytest.raises(ConfigError, match="model configuration"):
+        Settings.from_env()
+
+
+def test_default_model_map_dangling_ancestor_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    (home / ".config").symlink_to(home / "missing-config")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", raising=False)
+
+    with pytest.raises(ConfigError, match="model configuration"):
+        Settings.from_env()
+
+
+def test_default_model_map_presence_rejects_parent_traversal(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base"
+    child = base / "child"
+    child.mkdir(parents=True, mode=0o700)
+    base.chmod(0o700)
+    candidate = child / ".." / ".config" / "codex-openai-bridge" / "models.toml"
+
+    with pytest.raises(model_config_module.ModelConfigurationError, match="model configuration"):
+        model_config_module.model_map_entry_exists(candidate)
+
+
+def test_default_home_parent_traversal_fails_at_model_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base"
+    child = base / "child"
+    child.mkdir(parents=True, mode=0o700)
+    base.chmod(0o700)
+    monkeypatch.setenv("HOME", str(child / ".."))
+    monkeypatch.delenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", raising=False)
+
+    with pytest.raises(ConfigError, match="model configuration"):
+        Settings.from_env()
+
+
+def test_rejects_dotted_public_alias_but_allows_dotted_real_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    rejected = _model_config(
+        tmp_path,
+        'version = 1\n[models]\ncodex = "gpt-5.6-terra"\n"codex.sol" = "gpt-5.6-sol"\n',
+    )
+    monkeypatch.setenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", str(rejected))
+    with pytest.raises(ConfigError, match="model configuration"):
+        Settings.from_env()
+
+    accepted = _model_config(
+        tmp_path,
+        'version = 1\n[models]\ncodex = "provider.model-v1"\n',
+    )
+    monkeypatch.setenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", str(accepted))
+    assert Settings.from_env().model_map == {"codex": "provider.model-v1"}
+
+
+def test_one_entry_model_map_activates_scoped_continuations(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = _model_config(tmp_path, 'version = 1\n[models]\ncodex = "gpt-5.6-terra"\n')
+    monkeypatch.setenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", str(path))
+
+    settings = Settings.from_env()
+
+    assert settings.model_map_active is True
+    assert settings.public_models == ("codex",)
+
+
 def test_settings_are_immutable() -> None:
     settings = Settings.from_env()
 
@@ -99,16 +316,25 @@ def test_default_paths_are_derived_from_current_user_home(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
+    config_dir = home / ".config" / "codex-openai-bridge"
+    config_dir.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    (home / ".config").chmod(0o700)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("CODEX_BRIDGE_CODEX_PATH", raising=False)
     monkeypatch.delenv("CODEX_BRIDGE_CODEX_HOME", raising=False)
     monkeypatch.delenv("CODEX_BRIDGE_CLIENT_TOKEN_FILE", raising=False)
+    monkeypatch.delenv("CODEX_BRIDGE_CONTINUATION_KEY_FILE", raising=False)
 
     settings = Settings.from_env()
 
     assert settings.codex_path == home / ".local" / "bin" / "codex"
     assert settings.codex_home == home / ".codex"
     assert settings.client_token_file == home / ".config" / "codex-openai-bridge" / "client-token"
+    assert (
+        settings.continuation_key_file
+        == home / ".config" / "codex-openai-bridge" / "continuation-key"
+    )
     assert settings.codex_path.is_absolute()
     assert settings.codex_home.is_absolute()
     assert settings.credential_python_path == Path(sys.executable)
@@ -118,6 +344,82 @@ def test_default_paths_are_derived_from_current_user_home(
     assert not hasattr(settings, "hermes_python_path")
 
 
+def test_default_model_map_path_is_optional_and_loaded_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".config" / "codex-openai-bridge"
+    config_dir.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    (home / ".config").chmod(0o700)
+    config = config_dir / "models.toml"
+    config.write_text(
+        'version = 1\n[models]\ncodex = "gpt-5.6-terra"\ncodex-sol = "gpt-5.6-sol"\n',
+        encoding="utf-8",
+    )
+    config.chmod(0o600)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", raising=False)
+    monkeypatch.delenv("CODEX_BRIDGE_UPSTREAM_MODEL", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.model_config_file == config
+    assert settings.public_models == ("codex", "codex-sol")
+
+
+def test_default_model_map_absence_preserves_legacy_single_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".config" / "codex-openai-bridge"
+    config_dir.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    (home / ".config").chmod(0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", raising=False)
+    monkeypatch.setenv("CODEX_BRIDGE_UPSTREAM_MODEL", "gpt-legacy")
+
+    settings = Settings.from_env()
+
+    assert settings.model_config_file is None
+    assert settings.model_map == {"codex": "gpt-legacy"}
+
+
+def test_default_model_map_absent_ancestor_preserves_legacy_single_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", raising=False)
+    monkeypatch.setenv("CODEX_BRIDGE_UPSTREAM_MODEL", "gpt-legacy")
+
+    settings = Settings.from_env()
+
+    assert settings.model_config_file is None
+    assert settings.model_map == {"codex": "gpt-legacy"}
+
+
+def test_default_model_map_absent_home_preserves_legacy_single_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "literal-missing-home"
+    assert not home.exists()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", raising=False)
+    monkeypatch.setenv("CODEX_BRIDGE_UPSTREAM_MODEL", "gpt-legacy")
+
+    settings = Settings.from_env()
+
+    assert settings.model_config_file is None
+    assert settings.model_map == {"codex": "gpt-legacy"}
+
+
 def test_accepts_absolute_path_overrides(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -125,15 +427,18 @@ def test_accepts_absolute_path_overrides(
     codex_path = tmp_path / "bin" / "codex"
     codex_home = tmp_path / "codex-home"
     token_file = tmp_path / "client-token"
+    continuation_key_file = tmp_path / "continuation-key"
     monkeypatch.setenv("CODEX_BRIDGE_CODEX_PATH", str(codex_path))
     monkeypatch.setenv("CODEX_BRIDGE_CODEX_HOME", str(codex_home))
     monkeypatch.setenv("CODEX_BRIDGE_CLIENT_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("CODEX_BRIDGE_CONTINUATION_KEY_FILE", str(continuation_key_file))
 
     settings = Settings.from_env()
 
     assert settings.codex_path == codex_path
     assert settings.codex_home == codex_home
     assert settings.client_token_file == token_file
+    assert settings.continuation_key_file == continuation_key_file
 
 
 @pytest.mark.parametrize(
@@ -142,6 +447,7 @@ def test_accepts_absolute_path_overrides(
         "CODEX_BRIDGE_CODEX_PATH",
         "CODEX_BRIDGE_CODEX_HOME",
         "CODEX_BRIDGE_CLIENT_TOKEN_FILE",
+        "CODEX_BRIDGE_CONTINUATION_KEY_FILE",
     ],
 )
 def test_rejects_relative_configured_paths(

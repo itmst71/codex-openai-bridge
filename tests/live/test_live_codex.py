@@ -13,6 +13,8 @@ pytestmark = pytest.mark.skipif(
     reason="requires RUN_LIVE_CODEX=1",
 )
 
+LIVE_MODEL = os.environ.get("CODEX_BRIDGE_LIVE_MODEL", "codex")
+
 
 def _live_client() -> OpenAI:
     base_url = os.environ.get("CODEX_BRIDGE_LIVE_BASE_URL")
@@ -58,7 +60,7 @@ def test_live_codex_structured_output(
 ) -> None:
     with _live_client() as client:
         completion = client.chat.completions.create(
-            model="codex",
+            model=LIVE_MODEL,
             messages=[
                 {
                     "role": "user",
@@ -79,13 +81,13 @@ def test_live_codex_structured_output(
 def test_live_codex_nonstream_chat_and_responses() -> None:
     with _live_client() as client:
         chat = client.chat.completions.create(
-            model="codex",
+            model=LIVE_MODEL,
             messages=[{"role": "user", "content": "Reply with exactly OK."}],
         )
         assert (chat.choices[0].message.content or "").strip() == "OK"
 
         response = client.responses.create(
-            model="codex",
+            model=LIVE_MODEL,
             input="Reply with exactly OK.",
         )
         assert response.output_text.strip() == "OK"
@@ -94,7 +96,7 @@ def test_live_codex_nonstream_chat_and_responses() -> None:
 def test_live_codex_chat_and_responses_streams_reach_clean_terminals() -> None:
     with _live_client() as client:
         chat_stream = client.chat.completions.create(
-            model="codex",
+            model=LIVE_MODEL,
             messages=[{"role": "user", "content": "Reply with exactly OK."}],
             stream=True,
             stream_options={"include_usage": True},
@@ -109,7 +111,7 @@ def test_live_codex_chat_and_responses_streams_reach_clean_terminals() -> None:
         assert chat_usage is True
 
         response_stream = client.responses.create(
-            model="codex",
+            model=LIVE_MODEL,
             input="Reply with exactly OK.",
             stream=True,
         )
@@ -140,7 +142,7 @@ def test_live_codex_honcho_style_tool_roundtrip() -> None:
     }
     with _live_client() as client:
         first = client.chat.completions.create(
-            model="codex",
+            model=LIVE_MODEL,
             messages=[{"role": "user", "content": "Use lookup_weather for Tokyo."}],
             tools=cast(Any, [weather_tool]),
             tool_choice={"type": "function", "function": {"name": "lookup_weather"}},
@@ -162,7 +164,7 @@ def test_live_codex_honcho_style_tool_roundtrip() -> None:
         if reasoning_details is not None:
             assistant["reasoning_details"] = reasoning_details
         second = client.chat.completions.create(
-            model="codex",
+            model=LIVE_MODEL,
             messages=cast(
                 Any,
                 [
@@ -207,7 +209,7 @@ def test_live_codex_direct_responses_sequential_tool_rounds() -> None:
 
     with _live_client() as client:
         first = client.responses.create(
-            model="codex",
+            model=LIVE_MODEL,
             input=cast(Any, [user_item]),
             instructions=first_instruction,
             tools=cast(Any, tools),
@@ -231,7 +233,7 @@ def test_live_codex_direct_responses_sequential_tool_rounds() -> None:
         ]
 
         second = client.responses.create(
-            model="codex",
+            model=LIVE_MODEL,
             input=cast(Any, history),
             instructions=(
                 "The first result is complete. Carefully reason about the required ordering, "
@@ -261,7 +263,7 @@ def test_live_codex_direct_responses_sequential_tool_rounds() -> None:
         )
 
         final = client.responses.create(
-            model="codex",
+            model=LIVE_MODEL,
             input=cast(Any, history),
             instructions="Both tool results are complete. Reply with exactly SEQUENTIAL-TOOLS-OK.",
             tools=cast(Any, tools),

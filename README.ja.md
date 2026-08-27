@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/downloads/)
 
-Codex Responses backend のための、処理範囲を制限した loopback 専用の OpenAI 互換 HTTP ブリッジです。OpenAI Python SDK、Honcho、LangChain、OpenAI Agents SDK などのコンシューマーは、安定した公開モデルエイリアス（`codex`）を使用できます。一方、upstream URL、OAuth 認証、account ID、実際の model はサーバー側で管理されます。
+Codex Responses backend のための、処理範囲を制限した loopback 専用の OpenAI 互換 HTTP ブリッジです。OpenAI Python SDK、Honcho、LangChain、OpenAI Agents SDK などのコンシューマーは、serverが承認したaliasから選択できます。一方、upstream URL、OAuth 認証、account ID、実際の model はサーバー側で管理されます。必須のdefault aliasは`codex`です。
 
 このプロジェクトは独立した変換サービスです。agent loop、system prompt、memory、tools は実行**しません**。
 
@@ -87,7 +87,7 @@ flowchart TD
     bridge -->|"厳格な JSON/SSE 境界<br/>OpenAI ↔ Responses 変換"| upstream
 ```
 
-公開モデル名は常に `codex` です。ブリッジは、信頼されたサーバー側の状態から upstream model、URL、authorization、account、`store:false`、streaming policy、encrypted-reasoning include policy を再構成します。
+bridgeはserverが承認したaliasだけを公開します。信頼されたサーバー側の状態から実upstream model、URL、authorization、account、`store:false`、streaming policy、encrypted-reasoning include policyを再構成します。`/v1/models`、Chat、Responses、SSE projectionは実upstream model identifierを返しません。
 
 ## 対応範囲と非対応範囲
 
@@ -95,7 +95,7 @@ flowchart TD
 | --- | --- |
 | `GET /healthz` | 対応。プロセスの死活確認のみ |
 | `GET /readyz` | 対応。処理時間を制限した credential readiness |
-| `GET /v1/models` | 対応。`codex` のみを列挙 |
+| `GET /v1/models` | 対応。設定済み公開aliasだけを`codex`先頭で列挙 |
 | `POST /v1/chat/completions` | 対応。SSE streaming を含む |
 | `POST /v1/responses` | 実環境で検証済みの stateless subset に対応。名前付き Responses SSE events を含む |
 | Function tools と tool history | 厳格な identity および call/output pairing checks 付きで対応 |
@@ -109,7 +109,8 @@ flowchart TD
 | `POST /v1/embeddings` | **Embeddings は非対応**。サニタイズ済みの unsupported error を返す |
 | `previous_response_id`、conversations、stored response retrieval | 非対応。ブリッジは stateless を維持し、`store:false` を強制する |
 | Local shell、web search、computer use、MCP、hosted tools、image input | 非対応として拒否する。機能のエミュレーションは行わない |
-| クライアントが選択する upstream URL/model/account/auth policy | 非対応。無視または拒否する |
+| clientが選択する公開model alias | server operatorが設定したaliasに限り対応 |
+| clientが選択する実upstream URL/model/account/auth policy | 非対応として拒否 |
 | 429、5xx、timeout、interrupted generation の自動 retry | 非対応。upstream 401 の後に限り、credential refresh/replay を正確に 1 回だけ行う |
 
 このブリッジは、OpenAI Developer API と同等の SLA、embedding 対応、または ChatGPT/Codex subscription を service backend として恒久的に使用できる権利を保証しません。継続的にデプロイする前に、該当する製品条件と運用上の制限を確認してください。
@@ -138,7 +139,7 @@ flowchart LR
 
 現在対応している direct Responses request controls は次のとおりです。
 
-- 固定の公開 `model="codex"`、text `input`、およびサイズ制限付きの user/developer/assistant message items。
+- 設定済み公開model alias 1つ、text `input`、およびサイズ制限付きの user/developer/assistant message items。
 - `instructions`。
 - `reasoning.effort`: `none`、`low`、`medium`、`high`、`xhigh`、または `max`。
 - `reasoning.summary`: `auto`、`concise`、または `detailed`。
@@ -193,7 +194,9 @@ service は、検証済みの environment variables を読み込みます。主�
 | `CODEX_BRIDGE_HOST` | `127.0.0.1` | IPv4 または IPv6 の loopback address でなければならない |
 | `CODEX_BRIDGE_PORT` | `8646` | TCP port 1–65535 |
 | `CODEX_BRIDGE_CLIENT_TOKEN_FILE` | `~/.config/codex-openai-bridge/client-token` | Absolute path。owner、regular file、mode `0600` |
-| `CODEX_BRIDGE_UPSTREAM_MODEL` | project default | サーバーが管理する canonical model identifier |
+| `CODEX_BRIDGE_CONTINUATION_KEY_FILE` | `~/.config/codex-openai-bridge/continuation-key` | server-only continuation署名key。clientへ渡さない |
+| `CODEX_BRIDGE_MODEL_CONFIG_FILE` | 存在する場合`~/.config/codex-openai-bridge/models.toml` | owner管理alias mapのoptional absolute path |
+| `CODEX_BRIDGE_UPSTREAM_MODEL` | project default | 従来single-alias model。model mapが存在する場合は拒否 |
 | `CODEX_BRIDGE_CODEX_PATH` | `$HOME/.local/bin/codex` | OpenAI公式Codex CLI executableのabsolute path |
 | `CODEX_BRIDGE_CODEX_HOME` | `$HOME/.codex` | file-mode `auth.json`を含むCodex CLI homeのabsolute path |
 | `CODEX_BRIDGE_MAX_IN_FLIGHT` | `2` | 同時実行 owners の上限。最大 10 |
@@ -201,6 +204,32 @@ service は、検証済みの environment variables を読み込みます。主�
 | `CODEX_BRIDGE_TOTAL_REQUEST_DEADLINE_SECONDS` | `240` | downstream writes を含む request 全体 |
 
 追加の `CODEX_BRIDGE_MAX_*` と timeout variables は、`config.py` で厳格に制限されています。無効、noncanonical、non-loopback、または不整合な settings がある場合、起動に失敗します。
+
+### Server-owned model aliases
+
+必須の`codex`以外も有効にするにはexampleをcopyします。
+
+```bash
+install -d -m 700 "$HOME/.config/codex-openai-bridge"
+install -m 600 deploy/models.toml.example \
+  "$HOME/.config/codex-openai-bridge/models.toml"
+```
+
+```toml
+version = 1
+
+[models]
+codex = "gpt-5.6-terra"
+codex-sol = "gpt-5.6-sol"
+```
+
+左辺はclientから受理するserverが承認したalias、右辺はserver管理の実upstream modelです。`codex`は必須で、aliasは最大16件です。未知key、不正identifier、symlink、hard link、不安定なread、group/world-writableなpath authorityは起動時に拒否します。別のabsolute pathは`CODEX_BRIDGE_MODEL_CONFIG_FILE`で指定できます。Model mapと`CODEX_BRIDGE_UPSTREAM_MODEL`は競合authorityなので併用できません。
+
+Mapは起動時に一度だけ読み込みfreezeします。編集後はbridgeを再起動してください。in-flight requestが変更後mappingを観測することはありません。既存aliasの実modelを変更すると、以前のcontinuation stateは意図的にfail-closedで無効になります。`/v1/models`は`codex`を先頭に、残りを辞書順で返します。Responseはclientが選択したaliasを返し、実upstream model identifierを返しません。
+
+tool、reasoning、compaction continuation全体で同じaliasを使用してください。署名付きpublic continuation IDとopaque-state envelopeが、選択aliasと設定済み実modelの両方をbindし、cross-alias continuationはupstream access前に拒否します。Model mapを有効にする前にactiveな旧single-alias chainを完了してください。Modelを変える場合は現在のchainを完了するか、public textによる明示handoffでfresh chainを開始します。
+
+これらのoperator定義aliasはprojectのsupport claimではありません。Production処理へ割り当てる前に、使用するChat、Responses、streaming、structured output、tool、reasoning、compactionの各surfaceで実modelを個別にlive検証してください。
 
 repository に含まれる user unit には、意図的に `EnvironmentFile=` も secret も含めていません。secret 以外の overrides には、user-unit drop-in を使用してください。
 
@@ -224,7 +253,23 @@ umask 077
 chmod 600 "$HOME/.config/codex-openai-bridge/client-token"
 ```
 
-コンシューマーの設定ではこの file を参照し続けるか、そのコンシューマーの secret mechanism を介して値を注入してください。値を repository、unit、journal、command history に置かないでください。
+独立した43文字のserver-only continuation署名keyをもう1つ生成します。bridge client tokenとは異なる値でなければならず、API credentialとして送信してはいけません。
+
+```bash
+umask 077
+"$HOME/src/codex-openai-bridge/.venv/bin/python" -c \
+  'import secrets,sys; sys.stdout.write(secrets.token_urlsafe(32) + "\n")' \
+  > "$HOME/.config/codex-openai-bridge/continuation-key"
+chmod 600 "$HOME/.config/codex-openai-bridge/continuation-key"
+if cmp -s \
+  "$HOME/.config/codex-openai-bridge/client-token" \
+  "$HOME/.config/codex-openai-bridge/continuation-key"; then
+  rm -f "$HOME/.config/codex-openai-bridge/continuation-key"
+  exit 1
+fi
+```
+
+consumer設定では`client-token`だけを参照するか、その値をconsumerのsecret mechanismで注入してください。`continuation-key`をconsumerへ公開してはいけません。どちらの値もrepository、unit、journal、command historyへ置かないでください。
 
 ## systemd user service のデプロイ
 
@@ -647,11 +692,14 @@ print(completion.choices[0].message.content)
 
 ## アップグレードとロールバック
 
+upgrade前にactiveなtoolまたはreasoning chainをすべて完了してください。旧no-map releaseのChat reasoning detail `cobr_r2_`はclient tokenで署名されていました。このrevisionはclientが生成できるそのauthorityを意図的に受理しません。Cutover前に完了できないchainは、旧opaque reasoning stateをreplayせず、upgrade後にfresh chainとして開始してください。
+
 1. credentials を記録せず、現在デプロイされている Git revision を記録します。
-2. user service を停止し、listener がなくなったことを確認します。
-3. checkout をレビュー済みの revision に更新します。
-4. `uv sync --locked`、すべての test/type/lint gates、`systemd-analyze --user verify` を実行します。
-5. unit を再インストールし、`systemctl --user daemon-reload` を実行してから、起動して health/readiness/listener ownership を確認します。
+2. review済みrevisionを起動する前に`continuation-key`を生成して検証します。Owner管理のregular file、mode `0600`、link count 1、`client-token`と異なる値でなければなりません。上の**設定**にある生成手順を使用してください。
+3. user service を停止し、listener がなくなったことを確認します。
+4. checkout をレビュー済みの revision に更新します。
+5. `uv sync --locked`、すべての test/type/lint gates、`systemd-analyze --user verify` を実行します。
+6. unit を再インストールし、`systemctl --user daemon-reload` を実行してから、起動して health/readiness/listener ownership を確認します。
 
 ```bash
 cd "$HOME/src/codex-openai-bridge"
@@ -665,7 +713,7 @@ systemctl --user daemon-reload
 systemctl --user start codex-openai-bridge.service
 ```
 
-rollbackでは、以前に記録したreviewed revisionと、それに対応するlockfile/unitを使用して、同じ制限付き手順を繰り返します。異なるrevisionのsource、lockfile、virtual environment、unit definitionsを混在させないでください。bridge client tokenとOpenAI公式Codex CLI authentication stateはGit rollbackの対象ではありません。
+rollback前に新しいrevisionで作成したactive chainを完了するか、rollback後にfresh chainとして開始してください。署名済みreasoning／continuation stateはこの署名authority境界を越えて移行できません。その後、以前に記録したreviewed revisionと対応するlockfile/unitを使用して同じ制限付き手順を繰り返します。異なるrevisionのsource、lockfile、virtual environment、unit definitionsを混在させないでください。bridge client token、server-only continuation key、OpenAI公式Codex CLI authentication stateはGit rollbackの対象ではありません。
 
 ## 明示的に有効化する live tests
 

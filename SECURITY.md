@@ -22,6 +22,15 @@ Other Codex CLI versions remain unverified. API-key login, keyring scraping, pro
 account pooling, and bridge-owned OAuth are outside this project's scope. Treat
 `$CODEX_HOME/auth.json` as a password; never include it or any of its fields in a report.
 
+The optional owner-controlled model alias map is routing authority, not a client passthrough or a
+project support claim. It is read once with strict filesystem and schema checks. Public APIs expose
+only configured aliases; real upstream model identifiers remain server-owned and are never returned.
+Continuation authenticity uses a separate owner-only server signing key. It must never equal or be
+disclosed with the client-facing bearer token.
+Tool, reasoning, and compaction state uses signed continuation IDs and opaque-state envelopes bound
+to its selected alias and configured real model; cross-alias or remapped-route continuation is
+rejected before credential or upstream access.
+
 ## Reporting a vulnerability
 
 Use GitHub's private vulnerability-reporting form for this repository when it is available.

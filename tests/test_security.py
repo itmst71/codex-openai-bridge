@@ -69,12 +69,17 @@ def test_loads_secure_external_bridge_token(tmp_path: Path) -> None:
     assert os.stat(token_file).st_mode & 0o777 == 0o600
 
 
-def test_rejects_token_symlink(tmp_path: Path) -> None:
+def test_rejects_token_symlink_and_hardlink(tmp_path: Path) -> None:
     target = tmp_path / "target"
     link = tmp_path / "bridge-token"
     _write_token(target)
     link.symlink_to(target)
 
+    with pytest.raises(TokenConfigurationError, match="unavailable"):
+        load_bridge_token(link)
+
+    link.unlink()
+    os.link(target, link)
     with pytest.raises(TokenConfigurationError, match="unavailable"):
         load_bridge_token(link)
 

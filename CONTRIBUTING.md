@@ -72,6 +72,7 @@ Do not include credentials, access tokens, account IDs, real prompts, responses,
 encrypted reasoning data, raw upstream responses, or bridge client tokens in issues, pull requests,
 logs, screenshots, fixtures, commits, or review prompts. Use synthetic values and report only
 bounded structure, status, error code, counts, and versions.
+The server-only continuation signing key is also prohibited and must never be disclosed to clients.
 
 Security vulnerabilities must be reported privately using the process in [SECURITY.md](SECURITY.md).
 Do not open a public issue or pull request with exploit details.

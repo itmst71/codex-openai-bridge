@@ -10,6 +10,9 @@ from codex_openai_bridge.models import ParsedSseEvent
 from codex_openai_bridge.responses import (
     NamedCustomToolChoice,
     ResponsesRequest,
+    _model_scoped_encrypted_state,
+    _public_model_scoped_call_id,
+    _public_model_scoped_state_id,
     responses_public_snapshot,
     responses_to_public,
     validate_encrypted_reasoning_content,
@@ -86,6 +89,9 @@ def _project_item(
     allow_compaction: bool,
     allow_reasoning_summary: bool,
     max_string_bytes: int,
+    public_model: str,
+    binding_key: str | None,
+    model_scoped: bool,
 ) -> dict[str, Any]:
     if type(value) is not dict:
         raise _invalid()
@@ -126,7 +132,12 @@ def _project_item(
             "id": value["id"],
             "type": "function_call",
             "status": status,
-            "call_id": value["call_id"],
+            "call_id": _public_model_scoped_call_id(
+                value["call_id"],
+                public_model=public_model,
+                binding_key=binding_key,
+                model_scoped=model_scoped,
+            ),
             "name": value["name"],
             "arguments": value["arguments"],
         }
@@ -135,8 +146,15 @@ def _project_item(
         if set(value) == provider_fields:
             if value["summary"] != [] or value["content"] != []:
                 raise _invalid()
+            raw_item_id = validate_responses_identifier(value["id"])
             result: dict[str, Any] = {
-                "id": validate_responses_identifier(value["id"]),
+                "id": _public_model_scoped_state_id(
+                    raw_item_id,
+                    public_model=public_model,
+                    kind="responses_reasoning",
+                    binding_key=binding_key,
+                    model_scoped=model_scoped,
+                ),
                 "type": "reasoning",
                 "status": status,
                 "summary": [],
@@ -145,7 +163,16 @@ def _project_item(
                 value["encrypted_content"], max_string_bytes=max_string_bytes
             )
             if status == "completed":
-                result["encrypted_content"] = encrypted_content
+                result["encrypted_content"] = _model_scoped_encrypted_state(
+                    encrypted_content,
+                    public_model=public_model,
+                    kind="responses_reasoning_state",
+                    binding_key=binding_key,
+                    max_string_bytes=max_string_bytes,
+                    model_scoped=model_scoped,
+                    item_id=raw_item_id,
+                    upstream=True,
+                )
             return result
         required = {"id", "type", "status", "summary"}
         optional = {"encrypted_content"} if status == "completed" else set()
@@ -166,8 +193,15 @@ def _project_item(
             raise _invalid()
         if summary and not allow_reasoning_summary:
             raise _invalid()
+        raw_item_id = validate_responses_identifier(value["id"])
         result = {
-            "id": value["id"],
+            "id": _public_model_scoped_state_id(
+                raw_item_id,
+                public_model=public_model,
+                kind="responses_reasoning",
+                binding_key=binding_key,
+                model_scoped=model_scoped,
+            ),
             "type": "reasoning",
             "status": status,
             "summary": [{"type": "summary_text", "text": part["text"]} for part in summary],
@@ -175,18 +209,45 @@ def _project_item(
         if status == "completed":
             if "encrypted_content" not in value:
                 raise _invalid()
-            result["encrypted_content"] = validate_encrypted_reasoning_content(
+            encrypted_content = validate_encrypted_reasoning_content(
                 value["encrypted_content"], max_string_bytes=max_string_bytes
+            )
+            result["encrypted_content"] = _model_scoped_encrypted_state(
+                encrypted_content,
+                public_model=public_model,
+                kind="responses_reasoning_state",
+                binding_key=binding_key,
+                max_string_bytes=max_string_bytes,
+                model_scoped=model_scoped,
+                item_id=raw_item_id,
+                upstream=True,
             )
         return result
     if item_type == "compaction":
         if not allow_compaction or set(value) != {"id", "type", "encrypted_content"}:
             raise _invalid()
+        encrypted_content = validate_encrypted_reasoning_content(
+            value["encrypted_content"], max_string_bytes=max_string_bytes
+        )
+        raw_item_id = validate_responses_identifier(value["id"])
         return {
-            "id": validate_responses_identifier(value["id"]),
+            "id": _public_model_scoped_state_id(
+                raw_item_id,
+                public_model=public_model,
+                kind="responses_compaction",
+                binding_key=binding_key,
+                model_scoped=model_scoped,
+            ),
             "type": "compaction",
-            "encrypted_content": validate_encrypted_reasoning_content(
-                value["encrypted_content"], max_string_bytes=max_string_bytes
+            "encrypted_content": _model_scoped_encrypted_state(
+                encrypted_content,
+                public_model=public_model,
+                kind="responses_compaction_state",
+                binding_key=binding_key,
+                max_string_bytes=max_string_bytes,
+                model_scoped=model_scoped,
+                item_id=raw_item_id,
+                upstream=True,
             ),
         }
     raise _invalid()
@@ -208,9 +269,13 @@ class ResponsesSseTranslator:
         max_json_depth: int,
         max_json_nodes: int,
         max_string_bytes: int,
+        binding_key: str | None = None,
+        model_scoped: bool = False,
     ) -> None:
         self._request = request
         self._public_model = public_model
+        self._binding_key = binding_key
+        self._model_scoped = model_scoped
         self._max_items = max_items
         self._max_tools = max_tools
         self._max_json_depth = max_json_depth
@@ -256,6 +321,7 @@ class ResponsesSseTranslator:
             else None
         )
         self._item_ids: set[str] = set(request.historical_item_ids)
+        self._public_item_ids: dict[str, str] = {}
         self._call_ids: set[str] = set(request.historical_call_ids)
         self._reasoning_digests: set[bytes] = set(request.historical_reasoning_digests)
         self._iterator = self._translate()
@@ -278,6 +344,13 @@ class ResponsesSseTranslator:
             "sequence_number": sequence,
         }
         return _frame("error", value)
+
+    def _public_item_id(self, value: object) -> str:
+        raw_item_id = validate_responses_identifier(value)
+        try:
+            return self._public_item_ids[raw_item_id]
+        except KeyError:
+            raise _invalid() from None
 
     def _project(self, parsed: ParsedSseEvent) -> bytes | None:
         if parsed.done:
@@ -316,9 +389,17 @@ class ResponsesSseTranslator:
         if event_type in {"response.output_item.added", "response.output_item.done"}:
             status = "in_progress" if event_type.endswith("added") else "completed"
             raw_item = event["item"]
+            custom_raw_call_id: str | None = None
             if type(raw_item) is dict and raw_item.get("type") == "custom_tool_call":
                 item = self._validator.custom_public_item(
                     event["output_index"], completed=status == "completed"
+                )
+                custom_raw_call_id = validate_responses_identifier(item["call_id"])
+                item["call_id"] = _public_model_scoped_call_id(
+                    item["call_id"],
+                    public_model=self._public_model,
+                    binding_key=self._binding_key,
+                    model_scoped=self._model_scoped,
                 )
             else:
                 item = _project_item(
@@ -330,14 +411,35 @@ class ResponsesSseTranslator:
                         and self._request.reasoning.summary is not None
                     ),
                     max_string_bytes=self._max_string_bytes,
+                    public_model=self._public_model,
+                    binding_key=self._binding_key,
+                    model_scoped=self._model_scoped,
                 )
-            item_id = validate_responses_identifier(item.get("id"))
-            if item_id == self._response_id:
+            raw_item_id = (
+                validate_responses_identifier(item.get("id"))
+                if type(raw_item) is dict and raw_item.get("type") == "custom_tool_call"
+                else validate_responses_identifier(
+                    raw_item.get("id") if type(raw_item) is dict else None
+                )
+            )
+            if item["type"] not in {"reasoning", "compaction"}:
+                item["id"] = _public_model_scoped_state_id(
+                    raw_item_id,
+                    public_model=self._public_model,
+                    kind="responses_item",
+                    binding_key=self._binding_key,
+                    model_scoped=self._model_scoped,
+                )
+            public_item_id = item["id"]
+            if type(public_item_id) is not str or not public_item_id:
+                raise _invalid()
+            if raw_item_id == self._response_id:
                 raise _invalid()
             if status == "in_progress":
-                if item_id in self._item_ids:
+                if raw_item_id in self._item_ids:
                     raise _invalid()
-                self._item_ids.add(item_id)
+                self._item_ids.add(raw_item_id)
+                self._public_item_ids[raw_item_id] = public_item_id
                 self._item_count += 1
                 if self._item_count > self._max_items:
                     raise _invalid()
@@ -347,8 +449,9 @@ class ResponsesSseTranslator:
                         raise _invalid()
                     self._visible_output = True
                 elif item["type"] == "function_call":
-                    call_id = validate_responses_identifier(item.get("call_id"))
-                    name = validate_responses_identifier(item.get("name"))
+                    assert type(raw_item) is dict
+                    call_id = validate_responses_identifier(raw_item.get("call_id"))
+                    name = validate_responses_identifier(raw_item.get("name"))
                     self._function_count += 1
                     if (
                         call_id in self._call_ids
@@ -369,7 +472,9 @@ class ResponsesSseTranslator:
                     if self._function_phase or self._visible_output:
                         raise _invalid()
                 elif item["type"] == "custom_tool_call":
-                    call_id = validate_responses_identifier(item.get("call_id"))
+                    assert type(raw_item) is dict
+                    assert custom_raw_call_id is not None
+                    call_id = custom_raw_call_id
                     name = validate_responses_identifier(item.get("name"))
                     self._custom_count += 1
                     if (
@@ -385,8 +490,11 @@ class ResponsesSseTranslator:
                         raise _invalid()
                     self._call_ids.add(call_id)
                     self._visible_output = True
+            elif self._public_item_ids.get(raw_item_id) != public_item_id:
+                raise _invalid()
             elif item["type"] == "reasoning":
-                encrypted = item.get("encrypted_content")
+                assert type(raw_item) is dict
+                encrypted = raw_item.get("encrypted_content")
                 digest = encrypted_reasoning_data_digest(
                     encrypted,
                     max_string_bytes=self._max_string_bytes,
@@ -395,8 +503,9 @@ class ResponsesSseTranslator:
                     raise _invalid()
                 self._reasoning_digests.add(digest)
             elif item["type"] == "compaction":
+                assert type(raw_item) is dict
                 digest = encrypted_reasoning_data_digest(
-                    item["encrypted_content"],
+                    raw_item["encrypted_content"],
                     max_string_bytes=self._max_string_bytes,
                 )
                 if digest is None or digest in self._reasoning_digests:
@@ -420,7 +529,7 @@ class ResponsesSseTranslator:
                 event_type,
                 {
                     "type": event_type,
-                    "item_id": event["item_id"],
+                    "item_id": self._public_item_id(event["item_id"]),
                     "output_index": event["output_index"],
                     "content_index": event["content_index"],
                     "part": public_part,
@@ -435,7 +544,7 @@ class ResponsesSseTranslator:
                 event_type,
                 {
                     "type": event_type,
-                    "item_id": event["item_id"],
+                    "item_id": self._public_item_id(event["item_id"]),
                     "output_index": event["output_index"],
                     "content_index": event["content_index"],
                     text_field: event[text_field],
@@ -452,7 +561,7 @@ class ResponsesSseTranslator:
                 event_type,
                 {
                     "type": event_type,
-                    "item_id": event["item_id"],
+                    "item_id": self._public_item_id(event["item_id"]),
                     "output_index": event["output_index"],
                     value_field: event[value_field],
                     "sequence_number": sequence,
@@ -470,7 +579,9 @@ class ResponsesSseTranslator:
                     "type": event_type,
                     "sequence_number": sequence,
                     "output_index": output_index,
-                    "item_id": self._validator.custom_public_item_id(output_index),
+                    "item_id": self._public_item_id(
+                        self._validator.custom_public_item_id(output_index)
+                    ),
                     value_field: event[value_field],
                 },
             )
@@ -487,6 +598,8 @@ class ResponsesSseTranslator:
                 max_json_depth=self._max_json_depth,
                 max_json_nodes=self._max_json_nodes,
                 max_string_bytes=self._max_string_bytes,
+                binding_key=self._binding_key,
+                model_scoped=self._model_scoped,
             )
             return _frame(
                 event_type,
@@ -530,6 +643,8 @@ async def translate_responses_sse_to_public(
     max_json_depth: int,
     max_json_nodes: int,
     max_string_bytes: int,
+    binding_key: str | None = None,
+    model_scoped: bool = False,
 ) -> AsyncIterator[bytes]:
     """Translate strict upstream SSE into sanitized direct Responses SSE."""
     translator = ResponsesSseTranslator(
@@ -543,6 +658,8 @@ async def translate_responses_sse_to_public(
         max_json_depth=max_json_depth,
         max_json_nodes=max_json_nodes,
         max_string_bytes=max_string_bytes,
+        binding_key=binding_key,
+        model_scoped=model_scoped,
     )
     async for frame in translator:
         yield frame

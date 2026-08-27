@@ -7,9 +7,17 @@ import os
 import re
 import sys
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
+
+from codex_openai_bridge.model_config import (
+    ModelConfigurationError,
+    load_model_map,
+    model_map_entry_exists,
+)
 
 _MIB = 1024 * 1024
 _DECIMAL_INTEGER = re.compile(r"(?:0|[1-9][0-9]*)")
@@ -18,6 +26,7 @@ _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _KNOWN_ENVIRONMENT = frozenset(
     {
         "CODEX_BRIDGE_CLIENT_TOKEN_FILE",
+        "CODEX_BRIDGE_CONTINUATION_KEY_FILE",
         "CODEX_BRIDGE_CODEX_HOME",
         "CODEX_BRIDGE_CODEX_PATH",
         "CODEX_BRIDGE_CONNECT_TIMEOUT_SECONDS",
@@ -35,6 +44,7 @@ _KNOWN_ENVIRONMENT = frozenset(
         "CODEX_BRIDGE_MAX_STRING_BYTES",
         "CODEX_BRIDGE_MAX_TOOLS",
         "CODEX_BRIDGE_MAX_UPSTREAM_BODY_BYTES",
+        "CODEX_BRIDGE_MODEL_CONFIG_FILE",
         "CODEX_BRIDGE_PORT",
         "CODEX_BRIDGE_PUBLIC_MODEL",
         "CODEX_BRIDGE_QUEUE_WAIT_SECONDS",
@@ -98,10 +108,13 @@ class Settings:
     port: int
     public_model: str
     upstream_model: str
+    model_config_file: Path | None
+    model_map: Mapping[str, str]
     codex_path: Path
     codex_home: Path
     credential_python_path: Path
     client_token_file: Path
+    continuation_key_file: Path
     max_request_body_bytes: int
     max_json_depth: int
     max_json_nodes: int
@@ -120,6 +133,22 @@ class Settings:
     response_header_timeout_seconds: float
     stream_idle_timeout_seconds: float
     total_request_deadline_seconds: float
+
+    @property
+    def public_models(self) -> tuple[str, ...]:
+        """Return public aliases in stable discovery order."""
+        return tuple(self.model_map)
+
+    @property
+    def model_map_active(self) -> bool:
+        """Return whether operator model-map authority is active, even with one alias."""
+        return self.model_config_file is not None
+
+    def resolve_upstream_model(self, public_alias: str) -> str | None:
+        """Resolve only a server-approved public alias."""
+        if type(public_alias) is not str:
+            return None
+        return self.model_map.get(public_alias)
 
     def _validate_relationships(self) -> None:
         relationships = (
@@ -171,11 +200,40 @@ class Settings:
         if not address.is_loopback:
             raise ConfigError("bridge host must be a loopback IP address")
 
+        model_config_file: Path | None = None
+        explicit_model_config = "CODEX_BRIDGE_MODEL_CONFIG_FILE" in os.environ
+        default_model_config = Path.home() / ".config" / "codex-openai-bridge" / "models.toml"
+        if explicit_model_config:
+            candidate_model_config = _configured_path(
+                "CODEX_BRIDGE_MODEL_CONFIG_FILE",
+                Path(os.environ["CODEX_BRIDGE_MODEL_CONFIG_FILE"]),
+            )
+        else:
+            candidate_model_config = default_model_config
+        try:
+            default_model_config_present = model_map_entry_exists(candidate_model_config)
+        except ModelConfigurationError as exc:
+            raise ConfigError("model configuration is unavailable") from exc
+        if explicit_model_config or default_model_config_present:
+            model_config_file = candidate_model_config
+            if "CODEX_BRIDGE_UPSTREAM_MODEL" in os.environ:
+                raise ConfigError(
+                    "CODEX_BRIDGE_MODEL_CONFIG_FILE conflicts with CODEX_BRIDGE_UPSTREAM_MODEL"
+                )
+            try:
+                model_map = load_model_map(model_config_file, identifier_pattern=_MODEL_ID)
+            except ModelConfigurationError as exc:
+                raise ConfigError("model configuration is unavailable") from exc
+        else:
+            model_map = MappingProxyType({"codex": _configured_model()})
+
         settings = cls(
             host=host,
             port=_bounded_int("CODEX_BRIDGE_PORT", 8646, minimum=1, maximum=65_535),
             public_model="codex",
-            upstream_model=_configured_model(),
+            upstream_model=model_map["codex"],
+            model_config_file=model_config_file,
+            model_map=model_map,
             codex_path=_configured_path(
                 "CODEX_BRIDGE_CODEX_PATH", Path.home() / ".local" / "bin" / "codex"
             ),
@@ -184,6 +242,10 @@ class Settings:
             client_token_file=_configured_path(
                 "CODEX_BRIDGE_CLIENT_TOKEN_FILE",
                 Path.home() / ".config" / "codex-openai-bridge" / "client-token",
+            ),
+            continuation_key_file=_configured_path(
+                "CODEX_BRIDGE_CONTINUATION_KEY_FILE",
+                Path.home() / ".config" / "codex-openai-bridge" / "continuation-key",
             ),
             max_request_body_bytes=_bounded_int(
                 "CODEX_BRIDGE_MAX_REQUEST_BODY_BYTES", _MIB, minimum=1, maximum=16 * _MIB

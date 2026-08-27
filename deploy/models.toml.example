@@ -1,0 +1,5 @@
+version = 1
+
+[models]
+codex = "gpt-5.6-terra"
+codex-sol = "gpt-5.6-sol"

@@ -422,6 +422,34 @@ async def test_parallel_tool_declarations_arguments_and_indexes_preserve_event_o
 
 
 @pytest.mark.asyncio
+async def test_streamed_chat_tool_call_id_is_model_alias_bound() -> None:
+    events = _tool_events()
+    wire = b"".join(_event(value) for value in events) + b"data: [DONE]\n\n"
+
+    frames = [
+        frame
+        async for frame in translate_responses_sse(
+            _chunks(wire),
+            public_model="codex-sol",
+            include_usage=False,
+            max_sse_event_bytes=4096,
+            max_stream_bytes=65536,
+            max_json_depth=16,
+            max_json_nodes=256,
+            max_string_bytes=4096,
+            binding_key="k" * 43,
+            model_scoped=True,
+        )
+    ]
+    chunks = [_decode_chunk(frame) for frame in frames[:-1]]
+    public_call_id = chunks[1]["choices"][0]["delta"]["tool_calls"][0]["id"]
+
+    assert public_call_id.startswith("cobr_c1_")
+    assert "call_public_1" not in public_call_id
+    assert b"call_public_1" not in b"".join(frames)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("arguments", ["[]", "null", '{"x":NaN}', '{"x":1,"x":2}'])
 async def test_tool_arguments_must_finish_as_one_strict_json_object(arguments: str) -> None:
     events = _tool_events()

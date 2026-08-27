@@ -81,7 +81,14 @@ def _settings(tmp_path: Path) -> Settings:
     token_file = tmp_path / "client-token"
     token_file.write_text(TOKEN + "\n", encoding="ascii")
     token_file.chmod(0o600)
-    return replace(Settings.from_env(), client_token_file=token_file)
+    continuation_key_file = tmp_path / "continuation-key"
+    continuation_key_file.write_text("b" * 43 + "\n", encoding="ascii")
+    continuation_key_file.chmod(0o600)
+    return replace(
+        Settings.from_env(),
+        client_token_file=token_file,
+        continuation_key_file=continuation_key_file,
+    )
 
 
 def _request_document() -> dict[str, object]:
@@ -95,7 +102,7 @@ def _request_document() -> dict[str, object]:
         "data": REASONING_CANARY,
         "format": "openai-responses-v1",
         "id": create_reasoning_binding_id(
-            binding_key=TOKEN,
+            binding_key="b" * 43,
             content=None,
             tool_calls=(call,),
             index=0,

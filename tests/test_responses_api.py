@@ -4,7 +4,7 @@ import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 
 import httpx
@@ -18,6 +18,7 @@ import codex_openai_bridge.upstream as upstream_module
 from codex_openai_bridge.app import create_app
 from codex_openai_bridge.auth import Credential
 from codex_openai_bridge.config import Settings
+from codex_openai_bridge.continuation import encode_continuation_id, encode_continuation_state
 from codex_openai_bridge.json_boundary import JsonBodyTooLarge, JsonBoundaryError
 from codex_openai_bridge.responses import (
     ResponsesRequestError,
@@ -72,7 +73,14 @@ def _settings(tmp_path: Path) -> Settings:
     token_file = tmp_path / "client-token"
     token_file.write_text(TOKEN + "\n", encoding="ascii")
     token_file.chmod(0o600)
-    return replace(Settings.from_env(), client_token_file=token_file)
+    continuation_key_file = tmp_path / "continuation-key"
+    continuation_key_file.write_text("b" * 43 + "\n", encoding="ascii")
+    continuation_key_file.chmod(0o600)
+    return replace(
+        Settings.from_env(),
+        client_token_file=token_file,
+        continuation_key_file=continuation_key_file,
+    )
 
 
 def _credential() -> Credential:
@@ -82,6 +90,77 @@ def _credential() -> Credential:
         account_id="account-1",
         expires_at=4_102_444_800,
     )
+
+
+def test_direct_reasoning_rejects_same_route_id_state_splicing() -> None:
+    binding_key = "k" * 43
+    public_id_a = encode_continuation_id(
+        raw_id="rs_a",
+        public_model="codex-sol",
+        kind="responses_reasoning",
+        binding_key=binding_key,
+    )
+    state_b = encode_continuation_state(
+        "Yg==",
+        public_model="codex-sol",
+        kind="responses_reasoning_state",
+        binding_key=binding_key,
+        max_value_bytes=4096,
+        state="rs_b",
+    )
+    document = {
+        "model": "codex-sol",
+        "input": [
+            {
+                "id": public_id_a,
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [],
+                "encrypted_content": state_b,
+            }
+        ],
+    }
+
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        parse_responses_request(
+            document,
+            public_model=("codex", "codex-sol"),
+            max_items=16,
+            max_tools=8,
+            max_json_depth=16,
+            max_json_nodes=256,
+            max_string_bytes=4096,
+            binding_key=binding_key,
+            model_scoped=True,
+        )
+
+
+def test_model_scoped_compaction_requires_item_id_for_state_linkage() -> None:
+    state = encode_continuation_state(
+        "YQ==",
+        public_model="codex-sol",
+        kind="responses_compaction_state",
+        binding_key="k" * 43,
+        max_value_bytes=4096,
+        state="no-id",
+    )
+
+    with pytest.raises(ResponsesRequestError, match=r"^invalid request$"):
+        parse_responses_request(
+            {
+                "model": "codex-sol",
+                "input": [{"type": "compaction", "encrypted_content": state}],
+                "context_management": [{"type": "compaction", "compact_threshold": 1024}],
+            },
+            public_model=("codex", "codex-sol"),
+            max_items=16,
+            max_tools=8,
+            max_json_depth=16,
+            max_json_nodes=256,
+            max_string_bytes=4096,
+            binding_key="k" * 43,
+            model_scoped=True,
+        )
 
 
 def _text_response(text: str = "hello back") -> dict[str, Any]:
@@ -190,6 +269,249 @@ async def test_authenticated_nonstream_string_response_is_reconstructed_and_sdk_
 
 
 @pytest.mark.asyncio
+async def test_responses_routes_approved_alias_and_returns_only_that_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        model_config_file=tmp_path / "models.toml",
+        model_map=MappingProxyType(
+            {"codex": "gpt-5.6-terra", "codex-sol": "SENSITIVE_REAL_SOL_MODEL"}
+        ),
+    )
+    credential = _credential()
+    upstream_response = _text_response()
+    upstream_response["model"] = "SENSITIVE_REAL_SOL_MODEL"
+    upstream = FakeUpstream([upstream_response])
+    app = create_app(settings, StaticCredentialManager(credential), upstream=upstream)
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return {"model": "codex-sol", "input": "hello"}
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    response = await app_module._responses(cast(Any, SimpleNamespace(app=app)))
+    assert isinstance(response.body, (bytes, bytearray))
+    body = json.loads(response.body)
+
+    assert response.status == 200
+    assert upstream.calls[0][1]["model"] == "SENSITIVE_REAL_SOL_MODEL"
+    assert body["model"] == "codex-sol"
+    assert "SENSITIVE_REAL_SOL_MODEL" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_one_entry_model_map_scopes_direct_responses_continuations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        model_config_file=tmp_path / "models.toml",
+        model_map=MappingProxyType({"codex": "gpt-5.6-terra"}),
+    )
+    manager = StaticCredentialManager(_credential())
+    tool = {
+        "type": "function",
+        "name": "lookup",
+        "parameters": {"type": "object", "properties": {}},
+    }
+    first_upstream = _text_response()
+    first_upstream["output"] = [
+        {
+            "id": "fc_one_map",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_one_map",
+            "name": "lookup",
+            "arguments": "{}",
+        }
+    ]
+    upstream = FakeUpstream([first_upstream])
+    app = create_app(settings, manager, upstream=upstream)
+    documents: list[dict[str, object]] = [{"model": "codex", "input": "lookup", "tools": [tool]}]
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return documents.pop(0)
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    request = cast(Any, SimpleNamespace(app=app))
+    first = await app_module._responses(request)
+    assert isinstance(first.body, (bytes, bytearray))
+    public_call = json.loads(first.body)["output"][0]
+    assert public_call["call_id"].startswith("cobr_c1_")
+
+    history = [
+        public_call,
+        {
+            "type": "function_call_output",
+            "call_id": public_call["call_id"],
+            "output": "result",
+        },
+    ]
+    app[app_module._SETTINGS_KEY] = replace(
+        settings,
+        model_map=MappingProxyType({"codex": "gpt-5.6-terra-remapped"}),
+    )
+    documents.append({"model": "codex", "input": history, "tools": [tool]})
+    remapped = await app_module._responses(request)
+    assert remapped.status == 400
+    assert manager.calls == [False]
+    assert len(upstream.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_tool_continuation_is_model_alias_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        model_config_file=tmp_path / "models.toml",
+        model_map=MappingProxyType({"codex": "gpt-5.6-terra", "codex-sol": "gpt-5.6-sol"}),
+    )
+    credential = _credential()
+    manager = StaticCredentialManager(credential)
+    tool = {
+        "type": "function",
+        "name": "lookup",
+        "parameters": {"type": "object", "properties": {}},
+    }
+    first_upstream = _text_response()
+    first_upstream["id"] = "resp_direct_call"
+    first_upstream["output"] = [
+        {
+            "id": "fc_direct_call",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_direct_raw",
+            "name": "lookup",
+            "arguments": "{}",
+        }
+    ]
+    upstream = FakeUpstream([first_upstream, _text_response("done")])
+    app = create_app(settings, manager, upstream=upstream)
+    documents: list[dict[str, object]] = [
+        {"model": "codex-sol", "input": "lookup", "tools": [tool]}
+    ]
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return documents.pop(0)
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    request = cast(Any, SimpleNamespace(app=app))
+    first = await app_module._responses(request)
+    assert isinstance(first.body, (bytes, bytearray))
+    public_call = json.loads(first.body)["output"][0]
+    public_call_id = public_call["call_id"]
+    assert public_call_id.startswith("cobr_c1_")
+    history = [
+        public_call,
+        {"type": "function_call_output", "call_id": public_call_id, "output": "result"},
+    ]
+
+    documents.append({"model": "codex", "input": history, "tools": [tool]})
+    cross_alias = await app_module._responses(request)
+    assert cross_alias.status == 400
+    assert manager.calls == [False]
+    assert len(upstream.calls) == 1
+
+    raw_history = [
+        {**public_call, "call_id": "call_direct_raw"},
+        {"type": "function_call_output", "call_id": "call_direct_raw", "output": "result"},
+    ]
+    documents.append({"model": "codex", "input": raw_history, "tools": [tool]})
+    raw_legacy = await app_module._responses(request)
+    assert raw_legacy.status == 400
+    assert manager.calls == [False]
+    assert len(upstream.calls) == 1
+
+    app[app_module._SETTINGS_KEY] = replace(
+        settings,
+        model_map=MappingProxyType({"codex": "gpt-5.6-terra", "codex-sol": "gpt-5.6-sol-remapped"}),
+    )
+    documents.append({"model": "codex-sol", "input": history, "tools": [tool]})
+    remapped_alias = await app_module._responses(request)
+    assert remapped_alias.status == 400
+    assert manager.calls == [False]
+    assert len(upstream.calls) == 1
+    app[app_module._SETTINGS_KEY] = settings
+
+    output_item_id_history = [
+        public_call,
+        {
+            "id": "raw_output_item",
+            "type": "function_call_output",
+            "call_id": public_call_id,
+            "output": "result",
+        },
+    ]
+    documents.append({"model": "codex-sol", "input": output_item_id_history, "tools": [tool]})
+    unsigned_output_id = await app_module._responses(request)
+    assert unsigned_output_id.status == 400
+    assert manager.calls == [False]
+    assert len(upstream.calls) == 1
+
+    documents.append({"model": "codex-sol", "input": history, "tools": [tool]})
+    same_alias = await app_module._responses(request)
+    assert same_alias.status == 200
+    assert upstream.calls[1][1]["input"][0]["call_id"] == "call_direct_raw"
+    assert upstream.calls[1][1]["input"][1]["call_id"] == "call_direct_raw"
+
+
+@pytest.mark.asyncio
+async def test_responses_reasoning_continuation_is_model_alias_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        model_config_file=tmp_path / "models.toml",
+        model_map=MappingProxyType({"codex": "gpt-5.6-terra", "codex-sol": "gpt-5.6-sol"}),
+    )
+    manager = StaticCredentialManager(_credential())
+    first_upstream = _text_response("first")
+    first_upstream["id"] = "resp_direct_reason"
+    first_upstream["output"].insert(
+        0,
+        {
+            "id": "rs_direct_raw",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [],
+            "encrypted_content": "YQ==",
+        },
+    )
+    upstream = FakeUpstream([first_upstream, _text_response("second")])
+    app = create_app(settings, manager, upstream=upstream)
+    documents: list[dict[str, object]] = [{"model": "codex-sol", "input": "first"}]
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return documents.pop(0)
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    request = cast(Any, SimpleNamespace(app=app))
+    first = await app_module._responses(request)
+    assert isinstance(first.body, (bytes, bytearray))
+    reasoning = json.loads(first.body)["output"][0]
+    assert reasoning["id"].startswith("cobr_c1_")
+    history = [reasoning, {"role": "user", "content": "continue"}]
+
+    documents.append({"model": "codex", "input": history})
+    cross_alias = await app_module._responses(request)
+    assert cross_alias.status == 400
+    assert len(upstream.calls) == 1
+
+    documents.append({"model": "codex-sol", "input": history})
+    same_alias = await app_module._responses(request)
+    assert same_alias.status == 200
+    assert upstream.calls[1][1]["input"][0] == {
+        "type": "reasoning",
+        "summary": [],
+        "encrypted_content": "YQ==",
+    }
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "document",
