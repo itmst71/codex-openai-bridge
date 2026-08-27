@@ -28,6 +28,10 @@ def test_cli_runs_validated_application_without_touching_credentials(
     token_file.write_text(TOKEN + "\n", encoding="ascii")
     token_file.chmod(0o600)
     monkeypatch.setenv("CODEX_BRIDGE_CLIENT_TOKEN_FILE", str(token_file))
+    continuation_key_file = tmp_path / "continuation-key"
+    continuation_key_file.write_text("b" * 43 + "\n", encoding="ascii")
+    continuation_key_file.chmod(0o600)
+    monkeypatch.setenv("CODEX_BRIDGE_CONTINUATION_KEY_FILE", str(continuation_key_file))
     calls: list[tuple[web.Application, dict[str, object]]] = []
     configured: list[bool] = []
 

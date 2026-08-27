@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
+from codex_openai_bridge.continuation import ContinuationError, encode_continuation_id
 from codex_openai_bridge.models import ParsedSseEvent, StreamIdentity, StreamUsage
 from codex_openai_bridge.wire import (
     ChatCompletionRequest,
@@ -384,6 +385,8 @@ class _ResponsesStreamTranslator:
         max_items: int | None = None,
         max_tools: int | None = None,
         initial_call_ids: frozenset[str] = frozenset(),
+        binding_key: str | None = None,
+        model_scoped: bool = False,
     ) -> None:
         if (
             type(public_model) is not str
@@ -399,6 +402,9 @@ class _ResponsesStreamTranslator:
             )
             or (max_items is not None and (type(max_items) is not int or max_items <= 0))
             or (max_tools is not None and (type(max_tools) is not int or max_tools <= 0))
+            or (binding_key is not None and (type(binding_key) is not str or not binding_key))
+            or type(model_scoped) is not bool
+            or (model_scoped and binding_key is None)
         ):
             raise _invalid_stream()
         self.public_model = public_model
@@ -409,6 +415,8 @@ class _ResponsesStreamTranslator:
         self.custom_tool_name = custom_tool_name
         self.max_items = max_items
         self.max_tools = max_tools
+        self.binding_key = binding_key
+        self.model_scoped = model_scoped
         self.identity = StreamIdentity(
             response_id="chatcmpl-" + secrets.token_hex(12), created=int(time.time())
         )
@@ -752,7 +760,16 @@ class _ResponsesStreamTranslator:
                                 "tool_calls": [
                                     {
                                         "index": tool_state.tool_index,
-                                        "id": tool_state.call_id,
+                                        "id": (
+                                            encode_continuation_id(
+                                                raw_id=tool_state.call_id,
+                                                public_model=self.public_model,
+                                                kind="chat_call",
+                                                binding_key=self.binding_key,
+                                            )
+                                            if self.model_scoped and self.binding_key is not None
+                                            else tool_state.call_id
+                                        ),
                                         "type": "function",
                                         "function": {"name": tool_state.name, "arguments": ""},
                                     }
@@ -1377,6 +1394,8 @@ async def translate_responses_sse(
     max_json_depth: int,
     max_json_nodes: int,
     max_string_bytes: int,
+    binding_key: str | None = None,
+    model_scoped: bool = False,
 ) -> AsyncIterator[bytes]:
     """Translate a strict Codex Responses SSE stream into ChatCompletionChunk SSE."""
     translator = _ResponsesStreamTranslator(
@@ -1385,6 +1404,8 @@ async def translate_responses_sse(
         allow_compaction=False,
         max_unknown_events=max_json_nodes,
         max_string_bytes=max_string_bytes,
+        binding_key=binding_key,
+        model_scoped=model_scoped,
     )
     terminal_frames: tuple[bytes, ...] | None = None
     async for event in parse_responses_sse(
@@ -1610,6 +1631,7 @@ def responses_to_chat_completion(
     max_json_depth: int,
     max_json_nodes: int,
     max_string_bytes: int,
+    model_scoped: bool = False,
 ) -> dict[str, Any]:
     """Convert one completed assistant Responses result to Chat Completions format."""
     try:
@@ -1741,14 +1763,26 @@ def responses_to_chat_completion(
     }
     finish_reason = "stop"
     if function_calls:
-        message["tool_calls"] = [
-            {
-                "id": call["call_id"],
-                "type": "function",
-                "function": {"name": call["name"], "arguments": call["arguments"]},
-            }
-            for call in function_calls
-        ]
+        try:
+            message["tool_calls"] = [
+                {
+                    "id": (
+                        encode_continuation_id(
+                            raw_id=call["call_id"],
+                            public_model=public_model,
+                            kind="chat_call",
+                            binding_key=binding_key,
+                        )
+                        if model_scoped
+                        else call["call_id"]
+                    ),
+                    "type": "function",
+                    "function": {"name": call["name"], "arguments": call["arguments"]},
+                }
+                for call in function_calls
+            ]
+        except ContinuationError:
+            raise UpstreamResponseError("invalid upstream response") from None
         finish_reason = "tool_calls"
     if encrypted_items:
         bound_calls = tuple(
@@ -1771,6 +1805,7 @@ def responses_to_chat_completion(
                         tool_calls=bound_calls,
                         index=index,
                         data=data,
+                        public_model=public_model if model_scoped else None,
                     ),
                     "index": index,
                 }

@@ -105,6 +105,8 @@ def test_deployment_readme_covers_complete_operator_contract_without_secrets() -
     for required in (
         "http://127.0.0.1:8646/v1",
         "CODEX_BRIDGE_CLIENT_TOKEN_FILE",
+        "CODEX_BRIDGE_CONTINUATION_KEY_FILE",
+        "continuation-key",
         "chmod 600",
         "systemd-analyze --user verify",
         "systemctl --user daemon-reload",

@@ -148,7 +148,14 @@ def _settings(tmp_path: Path) -> Settings:
     token_file = tmp_path / "client-token"
     token_file.write_text(TOKEN + "\n", encoding="ascii")
     token_file.chmod(0o600)
-    return replace(Settings.from_env(), client_token_file=token_file)
+    continuation_key_file = tmp_path / "continuation-key"
+    continuation_key_file.write_text("b" * 43 + "\n", encoding="ascii")
+    continuation_key_file.chmod(0o600)
+    return replace(
+        Settings.from_env(),
+        client_token_file=token_file,
+        continuation_key_file=continuation_key_file,
+    )
 
 
 def _event(value: object) -> bytes:
@@ -517,6 +524,77 @@ async def test_direct_stream_projects_native_compaction_lifecycle_in_live_order(
     )
     _, replayed_completed = _decode(replayed_frames[-2])
     assert replayed_completed["response"]["output"] == completed["output"]
+
+
+@pytest.mark.asyncio
+async def test_direct_stream_compaction_and_message_ids_are_model_alias_bound() -> None:
+    document = _compaction_document(stream=True)
+    document["model"] = "codex-sol"
+    request = parse_responses_request(
+        document,
+        public_model=("codex", "codex-sol"),
+        max_items=16,
+        max_tools=8,
+        max_json_depth=16,
+        max_json_nodes=256,
+        max_string_bytes=4096,
+        binding_key=TOKEN,
+    )
+    wire = b"".join(_event(event) for event in _compaction_events())
+    frames = [
+        frame
+        async for frame in translate_responses_sse_to_public(
+            _chunks(wire),
+            request=request,
+            public_model="codex-sol",
+            max_items=16,
+            max_tools=8,
+            max_sse_event_bytes=4096,
+            max_stream_bytes=65536,
+            max_json_depth=16,
+            max_json_nodes=256,
+            max_string_bytes=4096,
+            binding_key=TOKEN,
+            model_scoped=True,
+        )
+    ]
+    decoded = [_decode(frame) for frame in frames[:-1]]
+    items = [
+        data["item"]
+        for name, data in decoded
+        if name in {"response.output_item.added", "response.output_item.done"}
+    ]
+    message_id = items[2]["id"]
+    text_item_ids = [
+        data["item_id"]
+        for name, data in decoded
+        if name
+        in {
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+        }
+    ]
+    completed = next(data["response"] for name, data in decoded if name == "response.completed")
+
+    assert all(item["id"].startswith("cobr_c1_") for item in items)
+    assert items[0]["encrypted_content"].startswith("cobr_s1_")
+    assert items[4]["encrypted_content"].startswith("cobr_s1_")
+    assert items[0] == items[1]
+    assert items[2]["id"] == items[3]["id"]
+    assert items[4] == items[5]
+    assert text_item_ids == [message_id, message_id, message_id, message_id]
+    assert completed["output"] == [items[1], items[3], items[5]]
+    serialized = b"".join(frames).decode()
+    for raw in (
+        "cmp_stream_1",
+        "cmp_stream_2",
+        "msg_compaction_stream",
+        "Y29tcGFjdC0x",
+        "Y29tcGFjdC0y",
+    ):
+        assert raw not in serialized
 
 
 @pytest.mark.asyncio
@@ -977,6 +1055,65 @@ def _function_events() -> list[dict[str, Any]]:
     return events
 
 
+@pytest.mark.asyncio
+async def test_direct_stream_function_call_id_is_model_alias_bound() -> None:
+    document = _tool_document()
+    document["model"] = "codex-sol"
+    request = parse_responses_request(
+        document,
+        public_model=("codex", "codex-sol"),
+        max_items=16,
+        max_tools=8,
+        max_json_depth=16,
+        max_json_nodes=256,
+        max_string_bytes=4096,
+        binding_key=TOKEN,
+    )
+    wire = b"".join(_event(event) for event in _function_events()) + b"data: [DONE]\n\n"
+    frames = [
+        frame
+        async for frame in translate_responses_sse_to_public(
+            _chunks(wire),
+            request=request,
+            public_model="codex-sol",
+            max_items=16,
+            max_tools=8,
+            max_sse_event_bytes=4096,
+            max_stream_bytes=65536,
+            max_json_depth=16,
+            max_json_nodes=256,
+            max_string_bytes=4096,
+            binding_key=TOKEN,
+            model_scoped=True,
+        )
+    ]
+    decoded = [_decode(frame) for frame in frames[:-1]]
+    added = next(data for name, data in decoded if name == "response.output_item.added")
+    done = next(data for name, data in decoded if name == "response.output_item.done")
+    completed = next(data for name, data in decoded if name == "response.completed")
+    public_call_id = added["item"]["call_id"]
+    public_item_id = added["item"]["id"]
+    argument_item_ids = [
+        data["item_id"]
+        for name, data in decoded
+        if name
+        in {
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+        }
+    ]
+
+    assert public_call_id.startswith("cobr_c1_")
+    assert public_item_id.startswith("cobr_c1_")
+    assert argument_item_ids == [public_item_id, public_item_id, public_item_id]
+    assert done["item"]["id"] == public_item_id
+    assert done["item"]["call_id"] == public_call_id
+    assert completed["response"]["output"][0]["id"] == public_item_id
+    assert completed["response"]["output"][0]["call_id"] == public_call_id
+    assert "call_stream" not in b"".join(frames).decode()
+    assert "fc_stream" not in b"".join(frames).decode()
+
+
 def _tool_document() -> dict[str, object]:
     return {
         "model": "codex",
@@ -1140,6 +1277,62 @@ async def test_custom_tool_stream_projects_exact_live_lifecycle_and_restores_out
     ResponseCompletedEvent.model_validate(decoded[-1][1])
     ResponseOutputItemDoneEvent.model_validate(decoded[5][1])
     ResponseCreatedEvent.model_validate(created)
+
+
+@pytest.mark.asyncio
+async def test_direct_stream_custom_tool_ids_are_model_alias_bound() -> None:
+    document = _custom_tool_document()
+    document["model"] = "codex-sol"
+    request = parse_responses_request(
+        document,
+        public_model=("codex", "codex-sol"),
+        max_items=16,
+        max_tools=8,
+        max_json_depth=16,
+        max_json_nodes=256,
+        max_string_bytes=4096,
+        binding_key=TOKEN,
+    )
+    wire = b"".join(_event(event) for event in _custom_tool_events())
+    frames = [
+        frame
+        async for frame in translate_responses_sse_to_public(
+            _chunks(wire),
+            request=request,
+            public_model="codex-sol",
+            max_items=16,
+            max_tools=8,
+            max_sse_event_bytes=4096,
+            max_stream_bytes=65536,
+            max_json_depth=16,
+            max_json_nodes=256,
+            max_string_bytes=4096,
+            binding_key=TOKEN,
+            model_scoped=True,
+        )
+    ]
+    decoded = [_decode(frame) for frame in frames[:-1]]
+    added = next(data["item"] for name, data in decoded if name == "response.output_item.added")
+    done = next(data["item"] for name, data in decoded if name == "response.output_item.done")
+    input_item_ids = [
+        data["item_id"]
+        for name, data in decoded
+        if name
+        in {
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.done",
+        }
+    ]
+    completed = next(data["response"] for name, data in decoded if name == "response.completed")
+
+    assert added["id"].startswith("cobr_c1_")
+    assert added["call_id"].startswith("cobr_c1_")
+    assert input_item_ids == [added["id"], added["id"]]
+    assert done["id"] == added["id"]
+    assert done["call_id"] == added["call_id"]
+    assert completed["output"] == [done]
+    assert "ctc_stream" not in b"".join(frames).decode()
+    assert "call_stream" not in b"".join(frames).decode()
 
 
 @pytest.mark.asyncio
@@ -1614,6 +1807,54 @@ async def test_reasoning_events_preserve_only_canonical_encrypted_content() -> N
 
     with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
         await _translate(_reasoning_events(encrypted_content="AB"))
+
+
+@pytest.mark.asyncio
+async def test_direct_stream_reasoning_state_is_model_alias_bound() -> None:
+    document = {"model": "codex-sol", "input": "hello", "stream": True}
+    request = parse_responses_request(
+        document,
+        public_model=("codex", "codex-sol"),
+        max_items=16,
+        max_tools=8,
+        max_json_depth=16,
+        max_json_nodes=256,
+        max_string_bytes=4096,
+        binding_key=TOKEN,
+    )
+    wire = b"".join(_event(event) for event in _reasoning_events()) + b"data: [DONE]\n\n"
+    frames = [
+        frame
+        async for frame in translate_responses_sse_to_public(
+            _chunks(wire),
+            request=request,
+            public_model="codex-sol",
+            max_items=16,
+            max_tools=8,
+            max_sse_event_bytes=4096,
+            max_stream_bytes=65536,
+            max_json_depth=16,
+            max_json_nodes=256,
+            max_string_bytes=4096,
+            binding_key=TOKEN,
+            model_scoped=True,
+        )
+    ]
+    decoded = [_decode(frame) for frame in frames[:-1]]
+    items = [
+        data["item"]
+        for name, data in decoded
+        if name in {"response.output_item.added", "response.output_item.done"}
+        and data["item"]["type"] == "reasoning"
+    ]
+    completed = next(data for name, data in decoded if name == "response.completed")
+
+    assert items[0]["id"].startswith("cobr_c1_")
+    assert items[1]["id"] == items[0]["id"]
+    assert items[1]["encrypted_content"].startswith("cobr_s1_")
+    assert completed["response"]["output"][0] == items[1]
+    assert "rs_stream" not in b"".join(frames).decode()
+    assert '"encrypted_content":"YQ=="' not in b"".join(frames).decode()
 
 
 @pytest.mark.asyncio

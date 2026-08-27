@@ -20,6 +20,7 @@ from codex_openai_bridge.admission import (
 )
 from codex_openai_bridge.auth import Credential
 from codex_openai_bridge.config import Settings
+from codex_openai_bridge.continuation import derive_route_binding_key
 from codex_openai_bridge.errors import openai_error_response
 from codex_openai_bridge.json_boundary import (
     JsonBodyTooLarge,
@@ -36,7 +37,11 @@ from codex_openai_bridge.responses import (
     responses_to_public,
 )
 from codex_openai_bridge.responses_stream import ResponsesSseTranslator
-from codex_openai_bridge.security import bearer_is_authorized, load_bridge_token
+from codex_openai_bridge.security import (
+    TokenConfigurationError,
+    bearer_is_authorized,
+    load_bridge_token,
+)
 from codex_openai_bridge.server import install_sanitized_protocol
 from codex_openai_bridge.translation import (
     UpstreamResponseError,
@@ -67,11 +72,34 @@ class CredentialProvider(Protocol):
 
 
 _TOKEN_KEY = web.AppKey("bridge_token", str)
+_CONTINUATION_KEY = web.AppKey("continuation_key", str)
 _CREDENTIAL_PROVIDER_KEY = web.AppKey("credential_provider", CredentialProvider)
 _SETTINGS_KEY = web.AppKey("settings", Settings)
 _UPSTREAM_KEY = web.AppKey("upstream", object)
 _ADMISSION_KEY = web.AppKey("admission", AdmissionController)
 _CANONICAL_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
+
+def _request_continuation_key(
+    settings: Settings,
+    binding_key: str,
+    document: object,
+) -> str:
+    if not settings.model_map_active or type(document) is not dict:
+        return binding_key
+    public_model = document.get("model")
+    if type(public_model) is not str:
+        return binding_key
+    upstream_model = settings.resolve_upstream_model(public_model)
+    if upstream_model is None:
+        return binding_key
+    return derive_route_binding_key(
+        binding_key,
+        public_model=public_model,
+        upstream_model=upstream_model,
+    )
+
+
 _READINESS_EXPIRY_SKEW_SECONDS = 60
 _REQUEST_ID_BYTES = 16
 _REQUEST_ID_HEADER = "X-Request-ID"
@@ -351,7 +379,7 @@ async def _healthz(_request: web.Request) -> web.Response:
 
 
 async def _models(request: web.Request) -> web.Response:
-    return web.json_response(model_list_document(request.app[_SETTINGS_KEY].public_model))
+    return web.json_response(model_list_document(request.app[_SETTINGS_KEY].public_models))
 
 
 async def _unsupported_embeddings(_request: web.Request) -> web.Response:
@@ -661,22 +689,29 @@ async def _stream_chat_completion(
     *,
     credential: Credential,
     payload: dict[str, object],
+    public_model: str | None = None,
+    binding_key: str | None = None,
+    model_scoped: bool | None = None,
     include_usage: bool,
     deadline: float,
     request_id: str | None = None,
 ) -> web.StreamResponse:
     settings = request.app[_SETTINGS_KEY]
+    response_model = public_model if public_model is not None else settings.public_model
+    scoped = settings.model_map_active if model_scoped is None else model_scoped
 
     def create_translation(chunks: AsyncIterator[bytes]) -> _StreamTranslation:
         frames = translate_responses_sse(
             chunks,
-            public_model=settings.public_model,
+            public_model=response_model,
             include_usage=include_usage,
             max_sse_event_bytes=settings.max_sse_event_bytes,
             max_stream_bytes=settings.max_stream_bytes,
             max_json_depth=settings.max_json_depth,
             max_json_nodes=settings.max_json_nodes,
             max_string_bytes=settings.max_string_bytes,
+            binding_key=binding_key,
+            model_scoped=scoped,
         )
         return _StreamTranslation(frames, lambda: _STREAM_ERROR_FRAME)
 
@@ -697,16 +732,19 @@ async def _stream_responses_response(
     credential: Credential,
     payload: dict[str, object],
     responses_request: ResponsesRequest,
+    binding_key: str | None = None,
+    model_scoped: bool | None = None,
     deadline: float,
     request_id: str | None = None,
 ) -> web.StreamResponse:
     settings = request.app[_SETTINGS_KEY]
+    scoped = settings.model_map_active if model_scoped is None else model_scoped
 
     def create_translation(chunks: AsyncIterator[bytes]) -> _StreamTranslation:
         translator = ResponsesSseTranslator(
             chunks,
             request=responses_request,
-            public_model=settings.public_model,
+            public_model=responses_request.model,
             max_items=settings.max_messages,
             max_tools=settings.max_tools,
             max_sse_event_bytes=settings.max_sse_event_bytes,
@@ -714,6 +752,8 @@ async def _stream_responses_response(
             max_json_depth=settings.max_json_depth,
             max_json_nodes=settings.max_json_nodes,
             max_string_bytes=settings.max_string_bytes,
+            binding_key=binding_key,
+            model_scoped=scoped,
         )
         return _StreamTranslation(
             translator,
@@ -751,18 +791,23 @@ async def _chat_completions(request: web.Request) -> web.Response:
         return _upstream_error_response(UpstreamError(UpstreamErrorKind.TIMEOUT))
     except JsonBoundaryError as error:
         return _json_boundary_response(error)
+    binding_key = _request_continuation_key(settings, request.app[_CONTINUATION_KEY], document)
     try:
         chat_request = parse_chat_completion_request(
             document,
-            public_model=settings.public_model,
+            public_model=settings.public_models,
             max_messages=settings.max_messages,
             max_tools=settings.max_tools,
             max_json_depth=settings.max_json_depth,
             max_json_nodes=settings.max_json_nodes,
             max_string_bytes=settings.max_string_bytes,
-            binding_key=request.app[_TOKEN_KEY],
+            binding_key=binding_key,
+            model_scoped=settings.model_map_active,
         )
-        payload = chat_request_to_responses(chat_request, upstream_model=settings.upstream_model)
+        upstream_model = settings.resolve_upstream_model(chat_request.model)
+        if upstream_model is None:
+            raise ChatRequestError("invalid request")
+        payload = chat_request_to_responses(chat_request, upstream_model=upstream_model)
     except ChatRequestError:
         return _invalid_request_response()
 
@@ -784,6 +829,8 @@ async def _chat_completions(request: web.Request) -> web.Response:
                     request,
                     credential=credential,
                     payload=payload,
+                    public_model=chat_request.model,
+                    binding_key=binding_key,
                     include_usage=chat_request.include_usage,
                     deadline=deadline,
                     request_id=_response_request_id(request),
@@ -800,11 +847,12 @@ async def _chat_completions(request: web.Request) -> web.Response:
         )
         completion = responses_to_chat_completion(
             upstream_response,
-            public_model=settings.public_model,
-            binding_key=request.app[_TOKEN_KEY],
+            public_model=chat_request.model,
+            binding_key=binding_key,
             max_json_depth=settings.max_json_depth,
             max_json_nodes=settings.max_json_nodes,
             max_string_bytes=settings.max_string_bytes,
+            model_scoped=settings.model_map_active,
         )
     except UpstreamError as error:
         return _upstream_error_response(error)
@@ -833,19 +881,25 @@ async def _responses(request: web.Request) -> web.Response:
         return _upstream_error_response(UpstreamError(UpstreamErrorKind.TIMEOUT))
     except JsonBoundaryError as error:
         return _json_boundary_response(error)
+    binding_key = _request_continuation_key(settings, request.app[_CONTINUATION_KEY], document)
     try:
         responses_request = parse_responses_request(
             document,
-            public_model=settings.public_model,
+            public_model=settings.public_models,
             max_items=settings.max_messages,
             max_tools=settings.max_tools,
             max_json_depth=settings.max_json_depth,
             max_json_nodes=settings.max_json_nodes,
             max_string_bytes=settings.max_string_bytes,
+            binding_key=binding_key,
+            model_scoped=settings.model_map_active,
         )
+        upstream_model = settings.resolve_upstream_model(responses_request.model)
+        if upstream_model is None:
+            raise ResponsesRequestError("invalid request")
         payload = responses_request_to_upstream(
             responses_request,
-            upstream_model=settings.upstream_model,
+            upstream_model=upstream_model,
         )
     except ResponsesRequestError:
         return _invalid_request_response()
@@ -871,6 +925,7 @@ async def _responses(request: web.Request) -> web.Response:
                     credential=credential,
                     payload=payload,
                     responses_request=responses_request,
+                    binding_key=binding_key,
                     deadline=deadline,
                     request_id=_response_request_id(request),
                 ),
@@ -888,12 +943,14 @@ async def _responses(request: web.Request) -> web.Response:
         public_response = responses_to_public(
             upstream_response,
             request=responses_request,
-            public_model=settings.public_model,
+            public_model=responses_request.model,
             max_items=settings.max_messages,
             max_tools=settings.max_tools,
             max_json_depth=settings.max_json_depth,
             max_json_nodes=settings.max_json_nodes,
             max_string_bytes=settings.max_string_bytes,
+            binding_key=binding_key,
+            model_scoped=settings.model_map_active,
         )
         if time.monotonic() > deadline:
             raise UpstreamError(UpstreamErrorKind.TIMEOUT)
@@ -918,6 +975,9 @@ def create_app(
         client_max_size=settings.max_request_body_bytes,
     )
     app[_TOKEN_KEY] = load_bridge_token(settings.client_token_file)
+    app[_CONTINUATION_KEY] = load_bridge_token(settings.continuation_key_file)
+    if secrets.compare_digest(app[_TOKEN_KEY], app[_CONTINUATION_KEY]):
+        raise TokenConfigurationError("bridge token is unavailable")
     app[_CREDENTIAL_PROVIDER_KEY] = credential_provider
     app[_SETTINGS_KEY] = settings
     app[_ADMISSION_KEY] = AdmissionController(

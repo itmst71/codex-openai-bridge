@@ -14,6 +14,7 @@ CONTRIBUTING_JA = ROOT / "CONTRIBUTING.ja.md"
 ISSUE_TEMPLATES = ROOT / ".github" / "ISSUE_TEMPLATE"
 PULL_REQUEST_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
 CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
+MODEL_CONFIG_EXAMPLE = ROOT / "deploy" / "models.toml.example"
 
 
 def test_publication_policy_is_explicit_and_bilingual() -> None:
@@ -114,6 +115,80 @@ def test_official_codex_cli_authentication_prerequisites_are_bilingual() -> None
         "Other Codex CLI versions remain unverified",
     ):
         assert required in security
+
+
+def test_model_alias_configuration_and_continuation_policy_are_bilingual() -> None:
+    english = README.read_text(encoding="utf-8")
+    japanese = README_JA.read_text(encoding="utf-8")
+    security = SECURITY.read_text(encoding="utf-8")
+    example = MODEL_CONFIG_EXAMPLE.read_text(encoding="utf-8")
+
+    for required in (
+        "~/.config/codex-openai-bridge/models.toml",
+        "CODEX_BRIDGE_MODEL_CONFIG_FILE",
+        "server-approved aliases",
+        "operator-defined aliases are not project support claims",
+        "same alias for the complete tool, reasoning, or compaction continuation",
+        "cross-alias continuation is rejected before upstream access",
+        "restart the bridge",
+        "real upstream model identifiers are never returned",
+        "CODEX_BRIDGE_CONTINUATION_KEY_FILE",
+        "continuation-key",
+        "must differ from the bridge client token",
+    ):
+        assert required in english
+    for required in (
+        "~/.config/codex-openai-bridge/models.toml",
+        "CODEX_BRIDGE_MODEL_CONFIG_FILE",
+        "serverが承認したalias",
+        "operator定義aliasはprojectのsupport claimではありません",
+        "tool、reasoning、compaction continuation全体で同じalias",
+        "cross-alias continuationはupstream access前に拒否",
+        "bridgeを再起動",
+        "実upstream model identifierを返しません",
+        "CODEX_BRIDGE_CONTINUATION_KEY_FILE",
+        "continuation-key",
+        "bridge client tokenとは異なる値",
+    ):
+        assert required in japanese
+    for required in (
+        "owner-controlled model alias map",
+        "real upstream model identifiers",
+        "cross-alias or remapped-route continuation",
+        "signed continuation",
+    ):
+        assert required in security
+    assert example == (
+        'version = 1\n\n[models]\ncodex = "gpt-5.6-terra"\ncodex-sol = "gpt-5.6-sol"\n'
+    )
+
+
+def test_upgrade_and_rollback_define_reasoning_signer_migration_boundary() -> None:
+    english = README.read_text(encoding="utf-8")
+    japanese = README_JA.read_text(encoding="utf-8")
+
+    for required in (
+        "Before upgrading, finish every active tool or reasoning chain",
+        "cobr_r2_",
+        "signed with the client token",
+        "Generate and verify `continuation-key` before starting the reviewed revision",
+        "mode `0600`",
+        "differs from `client-token`",
+        "start a fresh chain",
+        "Before rollback, finish active chains created by the newer revision",
+    ):
+        assert required in english
+    for required in (
+        "upgrade前にactiveなtoolまたはreasoning chainをすべて完了",
+        "cobr_r2_",
+        "client tokenで署名",
+        "review済みrevisionを起動する前に`continuation-key`を生成して検証",
+        "mode `0600`",
+        "`client-token`と異なる値",
+        "fresh chain",
+        "rollback前に新しいrevisionで作成したactive chainを完了",
+    ):
+        assert required in japanese
 
 
 def test_consumer_status_taxonomy_distinguishes_evidence_levels() -> None:

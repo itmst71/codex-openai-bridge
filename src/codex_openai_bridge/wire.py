@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from decimal import Decimal, DecimalException
 from typing import Any, Literal
 
+from codex_openai_bridge.continuation import ContinuationError, decode_continuation_id
+
 
 class ChatRequestError(ValueError):
     """Raised when a public Chat Completions request is unsupported or malformed."""
@@ -86,6 +88,7 @@ class ChatCompletionRequest:
 
     messages: tuple[ChatMessage, ...]
     max_output_tokens: int | None
+    model: str = "codex"
     tools: tuple[FunctionTool, ...] = ()
     tool_choice: Literal["auto", "required", "none"] | NamedFunctionToolChoice | None = None
     parallel_tool_calls: bool | None = None
@@ -123,15 +126,25 @@ def json_schema_name_for_upstream(name: str) -> str:
     return name.lower()
 
 
-def model_list_document(public_model: str) -> dict[str, object]:
+def model_list_document(public_model: str | tuple[str, ...]) -> dict[str, object]:
     """Build the stable, secret-free OpenAI model discovery document."""
-    if type(public_model) is not str or not public_model:
+    models: tuple[str, ...]
+    if type(public_model) is str:
+        models = (public_model,)
+    elif type(public_model) is tuple:
+        models = public_model
+    else:
+        raise ValueError("invalid public model")
+    if not models or any(type(model) is not str or not model for model in models):
+        raise ValueError("invalid public model")
+    ordered = ("codex", *sorted(model for model in models if model != "codex"))
+    if len(set(ordered)) != len(ordered) or "codex" not in models:
         raise ValueError("invalid public model")
     return {
         "object": "list",
         "data": [
             {
-                "id": public_model,
+                "id": model,
                 "created": 0,
                 "object": "model",
                 "owned_by": "codex-openai-bridge",
@@ -142,6 +155,7 @@ def model_list_document(public_model: str) -> dict[str, object]:
                     "embeddings": False,
                 },
             }
+            for model in ordered
         ],
     }
 
@@ -351,6 +365,7 @@ def create_reasoning_binding_id(
     tool_calls: tuple[ToolCall, ...],
     index: int,
     data: str,
+    public_model: str | None = None,
 ) -> str:
     """Bind opaque state to assistant semantics, canonicalizing tool JSON objects."""
     if (
@@ -366,7 +381,8 @@ def create_reasoning_binding_id(
         key = binding_key.encode("utf-8", errors="strict")
         canonical = json.dumps(
             {
-                "version": 2,
+                "version": 3 if public_model is not None else 2,
+                **({"model": public_model} if public_model is not None else {}),
                 "content": content,
                 "tool_calls": _reasoning_tool_call_projection(tool_calls),
                 "index": index,
@@ -379,7 +395,8 @@ def create_reasoning_binding_id(
     except (TypeError, UnicodeError):
         raise ValueError("invalid reasoning binding") from None
     digest = hmac.new(key, canonical, hashlib.sha256).digest()
-    return _REASONING_BINDING_PREFIX + base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    prefix = "cobr_r3_" if public_model is not None else _REASONING_BINDING_PREFIX
+    return prefix + base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
 def reasoning_binding_is_valid(
@@ -390,6 +407,7 @@ def reasoning_binding_is_valid(
     index: int,
     data: str,
     binding_id: object,
+    public_model: str | None = None,
 ) -> bool:
     """Verify a message-scoped binding in constant time."""
     if type(binding_id) is not str or not binding_id:
@@ -401,12 +419,27 @@ def reasoning_binding_is_valid(
             tool_calls=tool_calls,
             index=index,
             data=data,
+            public_model=public_model,
         ).encode("ascii")
         candidate = binding_id.encode("utf-8", errors="strict")
     except (UnicodeError, ValueError):
         return False
     # Rotation of the bridge token intentionally invalidates prior details fail-closed.
-    return hmac.compare_digest(expected, candidate)
+    if hmac.compare_digest(expected, candidate):
+        return True
+    if public_model != "codex":
+        return False
+    try:
+        legacy = create_reasoning_binding_id(
+            binding_key=binding_key,
+            content=content,
+            tool_calls=tool_calls,
+            index=index,
+            data=data,
+        ).encode("ascii")
+    except (UnicodeError, ValueError):
+        return False
+    return hmac.compare_digest(legacy, candidate)
 
 
 def _validate_bounded_json_tree(
@@ -606,6 +639,7 @@ def _parse_reasoning_details(
     max_string_bytes: int,
     seen_binding_ids: set[str],
     seen_data_digests: set[bytes],
+    public_model: str | None = None,
 ) -> tuple[tuple[ReasoningDetail, ...], int]:
     if type(value) is not list or not value:
         raise ChatRequestError("invalid request")
@@ -646,6 +680,7 @@ def _parse_reasoning_details(
                 index=index,
                 data=data,
                 binding_id=binding_id,
+                public_model=public_model,
             )
         ):
             raise ChatRequestError("invalid request")
@@ -660,18 +695,26 @@ def _parse_reasoning_details(
 def parse_chat_completion_request(
     value: object,
     *,
-    public_model: str,
+    public_model: str | tuple[str, ...],
     max_messages: int,
     max_tools: int,
     max_json_depth: int,
     max_json_nodes: int,
     max_string_bytes: int,
     binding_key: str,
+    model_scoped: bool | None = None,
 ) -> ChatCompletionRequest:
     """Parse without coercion and reject every unsupported field."""
     if (
         type(value) is not dict
-        or type(public_model) is not str
+        or not (
+            (type(public_model) is str and public_model)
+            or (
+                type(public_model) is tuple
+                and public_model
+                and all(type(model) is str and model for model in public_model)
+            )
+        )
         or type(max_messages) is not int
         or type(max_tools) is not int
         or type(max_json_depth) is not int
@@ -700,7 +743,13 @@ def parse_chat_completion_request(
     }
     if not set(document) <= allowed or "model" not in document or "messages" not in document:
         raise ChatRequestError("invalid request")
-    if type(document["model"]) is not str or document["model"] != public_model:
+    accepted_models = (public_model,) if type(public_model) is str else public_model
+    if type(document["model"]) is not str or document["model"] not in accepted_models:
+        raise ChatRequestError("invalid request")
+    selected_model = document["model"]
+    if model_scoped is None:
+        model_scoped = len(accepted_models) > 1
+    elif type(model_scoped) is not bool:
         raise ChatRequestError("invalid request")
     raw_messages = document["messages"]
     if type(raw_messages) is not list or not 1 <= len(raw_messages) <= max_messages:
@@ -723,12 +772,26 @@ def parse_chat_completion_request(
             if set(raw_message) != {"role", "content", "tool_call_id"}:
                 raise ChatRequestError("invalid request")
             content = raw_message["content"]
-            tool_call_id = raw_message["tool_call_id"]
+            public_tool_call_id = raw_message["tool_call_id"]
+            if type(public_tool_call_id) is not str or not public_tool_call_id:
+                raise ChatRequestError("invalid request")
+            try:
+                tool_call_id = (
+                    decode_continuation_id(
+                        public_tool_call_id,
+                        public_model=selected_model,
+                        kind="chat_call",
+                        binding_key=binding_key,
+                        allow_legacy=False,
+                    )
+                    if model_scoped
+                    else public_tool_call_id
+                )
+            except ContinuationError:
+                raise ChatRequestError("invalid request") from None
             if (
                 not pending_call_ids
                 or type(content) is not str
-                or type(tool_call_id) is not str
-                or not tool_call_id
                 or tool_call_id not in pending_call_ids
             ):
                 raise ChatRequestError("invalid request")
@@ -761,15 +824,30 @@ def parse_chat_completion_request(
                         or set(raw_function) != {"name", "arguments"}
                     ):
                         raise ChatRequestError("invalid request")
-                    call_id = raw_call["id"]
+                    public_call_id = raw_call["id"]
                     name = raw_function["name"]
                     if (
-                        type(call_id) is not str
-                        or not call_id
-                        or call_id in all_call_ids
+                        type(public_call_id) is not str
+                        or not public_call_id
                         or type(name) is not str
                         or not name
                     ):
+                        raise ChatRequestError("invalid request")
+                    try:
+                        call_id = (
+                            decode_continuation_id(
+                                public_call_id,
+                                public_model=selected_model,
+                                kind="chat_call",
+                                binding_key=binding_key,
+                                allow_legacy=False,
+                            )
+                            if model_scoped
+                            else public_call_id
+                        )
+                    except ContinuationError:
+                        raise ChatRequestError("invalid request") from None
+                    if call_id in all_call_ids:
                         raise ChatRequestError("invalid request")
                     arguments = _validate_arguments_object(raw_function["arguments"])
                     all_call_ids.add(call_id)
@@ -787,6 +865,7 @@ def parse_chat_completion_request(
                     max_string_bytes=max_string_bytes,
                     seen_binding_ids=seen_reasoning_binding_ids,
                     seen_data_digests=seen_reasoning_data_digests,
+                    public_model=selected_model if model_scoped else None,
                 )
                 remaining_reasoning_nodes -= nodes_used
             if content is None and not calls and not reasoning_details:
@@ -930,6 +1009,7 @@ def parse_chat_completion_request(
     return ChatCompletionRequest(
         messages=tuple(messages),
         max_output_tokens=max_output_tokens,
+        model=selected_model,
         tools=tuple(tools),
         tool_choice=tool_choice,
         parallel_tool_calls=parallel_tool_calls,

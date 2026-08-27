@@ -8,7 +8,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -22,6 +22,12 @@ import codex_openai_bridge.app as app_module
 from codex_openai_bridge.app import create_app
 from codex_openai_bridge.auth import Credential, CredentialUnavailable
 from codex_openai_bridge.config import Settings
+from codex_openai_bridge.continuation import (
+    ContinuationError,
+    decode_continuation_id,
+    derive_route_binding_key,
+)
+from codex_openai_bridge.security import TokenConfigurationError
 from codex_openai_bridge.upstream import UpstreamError, UpstreamErrorKind
 from codex_openai_bridge.wire import ToolCall, create_reasoning_binding_id
 
@@ -253,7 +259,41 @@ def _settings(tmp_path: Path) -> Settings:
     token_file = tmp_path / "client-token"
     token_file.write_text(TOKEN + "\n", encoding="ascii")
     token_file.chmod(0o600)
-    return replace(Settings.from_env(), client_token_file=token_file)
+    continuation_key_file = tmp_path / "continuation-key"
+    continuation_key_file.write_text("b" * 43 + "\n", encoding="ascii")
+    continuation_key_file.chmod(0o600)
+    return replace(
+        Settings.from_env(),
+        client_token_file=token_file,
+        continuation_key_file=continuation_key_file,
+    )
+
+
+def test_create_app_rejects_client_token_as_continuation_signing_key(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings = replace(settings, continuation_key_file=settings.client_token_file)
+
+    with pytest.raises(TokenConfigurationError, match="unavailable"):
+        create_app(settings, NeverCredentialManager(), upstream=SequenceFakeUpstream([]))
+
+
+def test_one_entry_map_route_key_changes_on_real_model_remap(tmp_path: Path) -> None:
+    base_key = "b" * 43
+    settings = replace(
+        _settings(tmp_path),
+        model_config_file=tmp_path / "models.toml",
+        model_map=MappingProxyType({"codex": "gpt-5.6-terra"}),
+    )
+    first = app_module._request_continuation_key(settings, base_key, {"model": "codex"})
+    remapped = app_module._request_continuation_key(
+        replace(settings, model_map=MappingProxyType({"codex": "gpt-5.6-terra-remapped"})),
+        base_key,
+        {"model": "codex"},
+    )
+
+    assert first != base_key
+    assert remapped != base_key
+    assert first != remapped
 
 
 @pytest.mark.parametrize(
@@ -358,6 +398,128 @@ async def test_authenticated_text_chat_completion_tracer_bullet(tmp_path: Path) 
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_chat_routes_approved_alias_and_returns_only_that_alias(tmp_path: Path) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        model_config_file=tmp_path / "models.toml",
+        model_map=MappingProxyType(
+            {"codex": "gpt-5.6-terra", "codex-sol": "SENSITIVE_REAL_SOL_MODEL"}
+        ),
+    )
+    credential = _credential()
+    upstream = FakeUpstream(
+        {
+            "id": "resp_alias",
+            "status": "completed",
+            "created_at": 1,
+            "model": "SENSITIVE_REAL_SOL_MODEL",
+            "output": [
+                {
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "ok"}],
+                }
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }
+    )
+    app = create_app(settings, StaticCredentialManager(credential), upstream=upstream)
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "codex-sol", "messages": [{"role": "user", "content": "hello"}]},
+            headers=AUTH,
+        )
+        body = await response.json()
+
+    assert response.status == 200
+    assert upstream.calls[0][1]["model"] == "SENSITIVE_REAL_SOL_MODEL"
+    assert body["model"] == "codex-sol"
+    assert "SENSITIVE_REAL_SOL_MODEL" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_one_entry_model_map_scopes_chat_continuations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        model_config_file=tmp_path / "models.toml",
+        model_map=MappingProxyType({"codex": "gpt-5.6-terra"}),
+    )
+    manager = StaticCredentialManager(_credential())
+    upstream = SequenceFakeUpstream(
+        [
+            {
+                "id": "resp_one_map",
+                "status": "completed",
+                "created_at": 1,
+                "output": [
+                    {
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": "call_one_map",
+                        "name": "lookup",
+                        "arguments": "{}",
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            }
+        ]
+    )
+    app = create_app(settings, manager, upstream=upstream)
+    tool = {
+        "type": "function",
+        "function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}},
+    }
+    documents: list[dict[str, object]] = [
+        {"model": "codex", "messages": [{"role": "user", "content": "lookup"}], "tools": [tool]}
+    ]
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return documents.pop(0)
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    request = cast(Any, SimpleNamespace(app=app))
+    first = await app_module._chat_completions(request)
+    assert isinstance(first.body, (bytes, bytearray))
+    public_call = json.loads(first.body)["choices"][0]["message"]["tool_calls"][0]
+    assert public_call["id"].startswith("cobr_c1_")
+
+    raw_history = [
+        {"role": "user", "content": "lookup"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{**public_call, "id": "call_one_map"}],
+        },
+        {"role": "tool", "tool_call_id": "call_one_map", "content": "result"},
+    ]
+    documents.append({"model": "codex", "messages": raw_history, "tools": [tool]})
+    rejected = await app_module._chat_completions(request)
+    assert rejected.status == 400
+    assert len(upstream.calls) == 1
+
+    signed_history = [
+        {"role": "user", "content": "lookup"},
+        {"role": "assistant", "content": None, "tool_calls": [public_call]},
+        {"role": "tool", "tool_call_id": public_call["id"], "content": "result"},
+    ]
+    app[app_module._SETTINGS_KEY] = replace(
+        settings,
+        model_map=MappingProxyType({"codex": "gpt-5.6-terra-remapped"}),
+    )
+    documents.append({"model": "codex", "messages": signed_history, "tools": [tool]})
+    remapped = await app_module._chat_completions(request)
+    assert remapped.status == 400
+    assert manager.calls == [False]
+    assert len(upstream.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -1092,6 +1254,270 @@ async def test_two_request_function_tool_round_trip_uses_injected_upstream_only(
             "output": '{"condition":"sunny"}',
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_continuation_is_model_alias_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        model_config_file=tmp_path / "models.toml",
+        model_map=MappingProxyType({"codex": "gpt-5.6-terra", "codex-sol": "gpt-5.6-sol"}),
+    )
+    credential = _credential()
+    manager = StaticCredentialManager(credential)
+    upstream = SequenceFakeUpstream(
+        [
+            {
+                "id": "resp_call_alias",
+                "status": "completed",
+                "created_at": 1,
+                "output": [
+                    {
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": "call_raw_alias",
+                        "name": "lookup",
+                        "arguments": "{}",
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            },
+            {
+                "id": "resp_final_alias",
+                "status": "completed",
+                "created_at": 2,
+                "output": [
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+            },
+        ]
+    )
+    app = create_app(settings, manager, upstream=upstream)
+    tool = {
+        "type": "function",
+        "function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}},
+    }
+    documents: list[dict[str, object]] = [
+        {
+            "model": "codex-sol",
+            "messages": [{"role": "user", "content": "lookup"}],
+            "tools": [tool],
+        }
+    ]
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return documents.pop(0)
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    request = cast(Any, SimpleNamespace(app=app))
+    first = await app_module._chat_completions(request)
+    assert isinstance(first.body, (bytes, bytearray))
+    assistant = json.loads(first.body)["choices"][0]["message"]
+    public_call_id = assistant["tool_calls"][0]["id"]
+    assert public_call_id.startswith("cobr_c1_")
+    client_derived_key = derive_route_binding_key(
+        TOKEN,
+        public_model="codex-sol",
+        upstream_model="gpt-5.6-sol",
+    )
+    with pytest.raises(ContinuationError):
+        decode_continuation_id(
+            public_call_id,
+            public_model="codex-sol",
+            kind="chat_call",
+            binding_key=client_derived_key,
+        )
+    server_derived_key = derive_route_binding_key(
+        "b" * 43,
+        public_model="codex-sol",
+        upstream_model="gpt-5.6-sol",
+    )
+    assert (
+        decode_continuation_id(
+            public_call_id,
+            public_model="codex-sol",
+            kind="chat_call",
+            binding_key=server_derived_key,
+        )
+        == "call_raw_alias"
+    )
+    history = [
+        {"role": "user", "content": "lookup"},
+        assistant,
+        {"role": "tool", "tool_call_id": public_call_id, "content": "result"},
+    ]
+    documents.append({"model": "codex", "messages": history, "tools": [tool]})
+    cross_alias = await app_module._chat_completions(request)
+    assert cross_alias.status == 400
+    assert manager.calls == [False]
+    assert len(upstream.calls) == 1
+
+    raw_history = [
+        {"role": "user", "content": "lookup"},
+        {
+            **assistant,
+            "tool_calls": [
+                {
+                    **assistant["tool_calls"][0],
+                    "id": "call_raw_alias",
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_raw_alias", "content": "result"},
+    ]
+    documents.append({"model": "codex", "messages": raw_history, "tools": [tool]})
+    raw_legacy = await app_module._chat_completions(request)
+    assert raw_legacy.status == 400
+    assert manager.calls == [False]
+    assert len(upstream.calls) == 1
+
+    app[app_module._SETTINGS_KEY] = replace(
+        settings,
+        model_map=MappingProxyType({"codex": "gpt-5.6-terra", "codex-sol": "gpt-5.6-sol-remapped"}),
+    )
+    documents.append({"model": "codex-sol", "messages": history, "tools": [tool]})
+    remapped_alias = await app_module._chat_completions(request)
+    assert remapped_alias.status == 400
+    assert manager.calls == [False]
+    assert len(upstream.calls) == 1
+    app[app_module._SETTINGS_KEY] = settings
+
+    documents.append({"model": "codex-sol", "messages": history, "tools": [tool]})
+    same_alias = await app_module._chat_completions(request)
+    assert same_alias.status == 200
+    assert upstream.calls[1][1]["input"][1]["call_id"] == "call_raw_alias"
+    assert upstream.calls[1][1]["input"][2]["call_id"] == "call_raw_alias"
+
+
+@pytest.mark.asyncio
+async def test_chat_reasoning_continuation_is_model_alias_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        model_config_file=tmp_path / "models.toml",
+        model_map=MappingProxyType({"codex": "gpt-5.6-terra", "codex-sol": "gpt-5.6-sol"}),
+    )
+    manager = StaticCredentialManager(_credential())
+    upstream = SequenceFakeUpstream(
+        [
+            {
+                "id": "resp_reason_alias",
+                "status": "completed",
+                "created_at": 1,
+                "output": [
+                    {
+                        "id": "rs_alias",
+                        "type": "reasoning",
+                        "status": "completed",
+                        "summary": [],
+                        "encrypted_content": "YQ==",
+                    },
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "first"}],
+                    },
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            },
+            {
+                "id": "resp_reason_final",
+                "status": "completed",
+                "created_at": 2,
+                "output": [
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "second"}],
+                    }
+                ],
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+            },
+        ]
+    )
+    app = create_app(settings, manager, upstream=upstream)
+    documents: list[dict[str, object]] = [
+        {"model": "codex-sol", "messages": [{"role": "user", "content": "first"}]}
+    ]
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return documents.pop(0)
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    request = cast(Any, SimpleNamespace(app=app))
+    first = await app_module._chat_completions(request)
+    assert isinstance(first.body, (bytes, bytearray))
+    first_message = json.loads(first.body)["choices"][0]["message"]
+    assert first_message["reasoning_details"][0]["id"].startswith("cobr_r3_")
+    history = [
+        {"role": "user", "content": "first"},
+        first_message,
+        {"role": "user", "content": "continue"},
+    ]
+
+    documents.append({"model": "codex", "messages": history})
+    cross_alias = await app_module._chat_completions(request)
+    assert cross_alias.status == 400
+    assert len(upstream.calls) == 1
+
+    documents.append({"model": "codex-sol", "messages": history})
+    same_alias = await app_module._chat_completions(request)
+    assert same_alias.status == 200
+    assert upstream.calls[1][1]["input"][1] == {
+        "type": "reasoning",
+        "summary": [],
+        "encrypted_content": "YQ==",
+    }
+
+
+@pytest.mark.asyncio
+async def test_no_map_upgrade_rejects_legacy_client_token_reasoning_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    app = create_app(settings, NeverCredentialManager(), upstream=SequenceFakeUpstream([]))
+    legacy_detail = {
+        "type": "reasoning.encrypted",
+        "data": "YQ==",
+        "format": "openai-responses-v1",
+        "id": create_reasoning_binding_id(
+            binding_key=TOKEN,
+            content="first",
+            tool_calls=(),
+            index=0,
+            data="YQ==",
+        ),
+        "index": 0,
+    }
+
+    async def read_document(_request: Any, **_kwargs: Any) -> object:
+        return {
+            "model": "codex",
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "first", "reasoning_details": [legacy_detail]},
+                {"role": "user", "content": "continue"},
+            ],
+        }
+
+    monkeypatch.setattr(app_module, "read_json_request", read_document)
+    response = await app_module._chat_completions(cast(Any, SimpleNamespace(app=app)))
+
+    assert response.status == 400
 
 
 @pytest.mark.asyncio
@@ -2246,6 +2672,31 @@ async def test_models_requires_auth_and_returns_stable_secret_free_capabilities(
     assert TOKEN not in serialized
     assert settings.upstream_model not in serialized
     assert upstream.calls == []
+
+
+@pytest.mark.asyncio
+async def test_models_lists_only_server_approved_aliases_in_stable_order(tmp_path: Path) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        model_config_file=tmp_path / "models.toml",
+        model_map=MappingProxyType(
+            {
+                "codex": "SENSITIVE_DEFAULT_MODEL",
+                "codex-z": "SENSITIVE_Z_MODEL",
+                "codex-a": "SENSITIVE_A_MODEL",
+            }
+        ),
+    )
+    app = create_app(settings, NeverCredentialManager(), upstream=FakeUpstream({}))
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/v1/models", headers=AUTH)
+        body = await response.json()
+
+    assert response.status == 200
+    assert [model["id"] for model in body["data"]] == ["codex", "codex-a", "codex-z"]
+    serialized = json.dumps(body)
+    assert "SENSITIVE_" not in serialized
 
 
 @pytest.mark.asyncio

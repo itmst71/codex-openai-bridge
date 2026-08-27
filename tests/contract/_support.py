@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from aiohttp import web
@@ -116,11 +117,16 @@ async def contract_server(
     token_file = tmp_path / "contract-client-token"
     token_file.write_text(CLIENT_TOKEN + "\n", encoding="ascii")
     token_file.chmod(0o600)
+    continuation_key_file = tmp_path / "contract-continuation-key"
+    continuation_key_file.write_text("d" * 43 + "\n", encoding="ascii")
+    continuation_key_file.chmod(0o600)
     settings = replace(
         Settings.from_env(),
         client_token_file=token_file,
+        continuation_key_file=continuation_key_file,
         public_model=PUBLIC_MODEL,
         upstream_model=UPSTREAM_MODEL,
+        model_map=MappingProxyType({PUBLIC_MODEL: UPSTREAM_MODEL}),
         total_request_deadline_seconds=5.0,
     )
     upstream = RecordingUpstream(responses=responses, streams=streams)

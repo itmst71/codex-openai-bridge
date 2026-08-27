@@ -43,6 +43,7 @@ def load_bridge_token(path: Path) -> str:
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_uid != os.geteuid()
                 or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1
             ):
                 raise ValueError
             raw = os.read(descriptor, _MAX_TOKEN_FILE_BYTES + 1)

@@ -65,6 +65,7 @@ owner-local実行を要求できます。
 Issue、PR、log、screenshot、fixture、commit、review promptへcredential、access token、account ID、実prompt、
 response、tool argument、encrypted reasoning data、raw upstream response、bridge client tokenを含めないで
 ください。Synthetic valueを使い、bounded structure、status、error code、count、versionだけを報告します。
+server-only continuation署名keyも禁止対象で、clientへ公開してはいけません。
 
 security vulnerabilityはprivateに報告し、[SECURITY.md](SECURITY.md)の手順に従ってください。Exploitの
 詳細をpublic issueやPRへ記載しないでください。

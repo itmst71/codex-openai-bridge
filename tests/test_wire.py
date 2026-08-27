@@ -1023,8 +1023,10 @@ def test_reasoning_details_accept_exact_depth_nodes_and_string_then_reject_one_o
                 public_model="codex",
                 max_messages=1,
                 max_tools=1,
+                max_json_depth=changed_limit["max_json_depth"],
+                max_json_nodes=changed_limit["max_json_nodes"],
+                max_string_bytes=changed_limit["max_string_bytes"],
                 binding_key="bridge-secret",
-                **changed_limit,
             )
 
 
