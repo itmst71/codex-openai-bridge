@@ -114,6 +114,31 @@ def test_loads_owner_controlled_model_alias_map(
     assert settings.resolve_upstream_model("missing") is None
 
 
+def test_model_map_reader_does_not_require_root_directory_fd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _model_config(
+        tmp_path,
+        'version = 1\n[models]\ncodex = "gpt-5.6-terra"\ncodex-sol = "gpt-5.6-sol"\n',
+    )
+    original_open = os.open
+
+    def sandbox_open(
+        path: os.PathLike[str] | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        if path == "/":
+            raise PermissionError("sandbox denies a root directory fd")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", sandbox_open)
+    monkeypatch.setenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", str(config))
+
+    settings = Settings.from_env()
+
+    assert settings.public_models == ("codex", "codex-sol")
+
+
 def test_model_map_reader_handles_bounded_short_regular_file_reads(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
