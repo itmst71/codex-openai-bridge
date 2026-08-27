@@ -93,7 +93,6 @@ uv run ruff check .
 uv run ruff format --check .
 uv run python -m compileall -q src tests scripts
 uv run python scripts/verify_systemd_unit.py
-systemd-analyze --user verify deploy/systemd/codex-openai-bridge.service
 git diff --check
 ```
 
