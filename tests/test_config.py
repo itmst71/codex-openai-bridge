@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 import pytest
 
+import codex_openai_bridge.model_config as model_config_module
 from codex_openai_bridge.config import ConfigError, Settings
 
 MIB = 1024 * 1024
@@ -242,6 +243,34 @@ def test_default_model_map_dangling_ancestor_fails_closed(
         Settings.from_env()
 
 
+def test_default_model_map_presence_rejects_parent_traversal(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base"
+    child = base / "child"
+    child.mkdir(parents=True, mode=0o700)
+    base.chmod(0o700)
+    candidate = child / ".." / ".config" / "codex-openai-bridge" / "models.toml"
+
+    with pytest.raises(model_config_module.ModelConfigurationError, match="model configuration"):
+        model_config_module.model_map_entry_exists(candidate)
+
+
+def test_default_home_parent_traversal_fails_at_model_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base"
+    child = base / "child"
+    child.mkdir(parents=True, mode=0o700)
+    base.chmod(0o700)
+    monkeypatch.setenv("HOME", str(child / ".."))
+    monkeypatch.delenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", raising=False)
+
+    with pytest.raises(ConfigError, match="model configuration"):
+        Settings.from_env()
+
+
 def test_rejects_dotted_public_alias_but_allows_dotted_real_model(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -349,6 +378,38 @@ def test_default_model_map_absence_preserves_legacy_single_alias(
     config_dir.mkdir(parents=True, mode=0o700)
     home.chmod(0o700)
     (home / ".config").chmod(0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", raising=False)
+    monkeypatch.setenv("CODEX_BRIDGE_UPSTREAM_MODEL", "gpt-legacy")
+
+    settings = Settings.from_env()
+
+    assert settings.model_config_file is None
+    assert settings.model_map == {"codex": "gpt-legacy"}
+
+
+def test_default_model_map_absent_ancestor_preserves_legacy_single_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", raising=False)
+    monkeypatch.setenv("CODEX_BRIDGE_UPSTREAM_MODEL", "gpt-legacy")
+
+    settings = Settings.from_env()
+
+    assert settings.model_config_file is None
+    assert settings.model_map == {"codex": "gpt-legacy"}
+
+
+def test_default_model_map_absent_home_preserves_legacy_single_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "literal-missing-home"
+    assert not home.exists()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("CODEX_BRIDGE_MODEL_CONFIG_FILE", raising=False)
     monkeypatch.setenv("CODEX_BRIDGE_UPSTREAM_MODEL", "gpt-legacy")

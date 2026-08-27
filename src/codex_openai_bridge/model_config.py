@@ -27,8 +27,9 @@ def _open_directory_without_symlinks(path: Path) -> int:
                 os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
                 dir_fd=descriptor,
             )
-            os.close(descriptor)
+            previous = descriptor
             descriptor = child
+            os.close(previous)
             metadata = os.fstat(descriptor)
             writable_by_others = bool(stat.S_IMODE(metadata.st_mode) & 0o022)
             sticky_directory = bool(metadata.st_mode & stat.S_ISVTX)
@@ -41,21 +42,42 @@ def _open_directory_without_symlinks(path: Path) -> int:
 
 
 def model_map_entry_exists(path: Path) -> bool:
-    """Return false only when the final entry is absent under a verified parent."""
-    if not isinstance(path, Path) or not path.is_absolute() or not path.name:
+    """Return false only when one literal path entry is safely absent."""
+    if not isinstance(path, Path) or not path.is_absolute() or not path.name or ".." in path.parts:
         raise ModelConfigurationError("model configuration is unavailable")
+    descriptor = -1
     try:
-        parent = _open_directory_without_symlinks(path.parent)
-        try:
+        descriptor = os.open("/", os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+        for component in path.parent.parts[1:]:
             try:
-                os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+                metadata = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
             except FileNotFoundError:
                 return False
-        finally:
-            os.close(parent)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError
+            child = os.open(
+                component,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            previous = descriptor
+            descriptor = child
+            os.close(previous)
+            metadata = os.fstat(descriptor)
+            writable_by_others = bool(stat.S_IMODE(metadata.st_mode) & 0o022)
+            sticky_directory = bool(metadata.st_mode & stat.S_ISVTX)
+            if writable_by_others and not sticky_directory:
+                raise ValueError
+        try:
+            os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
         return True
     except (OSError, ValueError):
         raise ModelConfigurationError("model configuration is unavailable") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def load_model_map(path: Path, *, identifier_pattern: re.Pattern[str]) -> Mapping[str, str]:
