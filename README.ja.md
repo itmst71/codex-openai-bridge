@@ -172,7 +172,7 @@ Offline contract tests は、固定した OpenAI Python SDK 1.109.1 と、別途
 - Codex OAuth credentialsは、OpenAI公式Codex CLIのfile storeから制限付きhelperを通して読みます。loginとrefreshを書き込むauthorityはCodex CLIだけであり、このrepositoryやsystemd unitへcredentialをコピーしません。
 - Upstream URL、authorization、account ID、model、prompts、tool arguments、encrypted reasoning は、operational logs と sanitized errors から除外されます。
 - Request bodies、JSON structure、helper output、upstream bodies、SSE events/streams、queueing、concurrency、deadlines、shutdown には制限が適用されます。
-- OpenAI公式Codex CLIが認証状態をatomicに更新する場合があるため、`ProtectHome=read-only`は`ReadWritePaths=%h/.codex`を指定した場合に限って緩和されます。systemd unitでは、`%h`はservice userのhome directoryへ展開されます。
+- OpenAI公式Codex CLIが認証状態をatomicに更新する場合があるため、`ProtectHome=read-only`は検証済みの具体的な`--codex-home`をrenderした`ReadWritePaths=`に対してだけ緩和されます。生成される`CODEX_BRIDGE_CODEX_HOME`と`ReadWritePaths=`は同一のexact pathです。
 - sandbox は、意図しないアクセスと service compromise の影響を軽減します。同じ Unix UID ですでに実行されているあらゆる malicious process から保護できるとはしていません。
 - port 8646 を public reverse proxy 経由で公開しないでください。信頼できる remote コンシューマーが必要な場合は、別途レビューした authenticated tunnel を使用し、loopback bind を維持してください。
 
@@ -181,9 +181,8 @@ Offline contract tests は、固定した OpenAI Python SDK 1.109.1 と、別途
 environment を作成し、固定された project をインストールします。
 
 ```bash
-git clone https://github.com/itmst71/codex-openai-bridge.git \
-  "$HOME/src/codex-openai-bridge"
-cd "$HOME/src/codex-openai-bridge"
+git clone https://github.com/itmst71/codex-openai-bridge.git
+cd codex-openai-bridge
 uv sync --locked
 ```
 
@@ -231,7 +230,7 @@ tool、reasoning、compaction continuation全体で同じaliasを使用してく
 
 これらのoperator定義aliasはprojectのsupport claimではありません。Production処理へ割り当てる前に、使用するChat、Responses、streaming、structured output、tool、reasoning、compactionの各surfaceで実modelを個別にlive検証してください。
 
-repository に含まれる user unit には、意図的に `EnvironmentFile=` も secret も含めていません。secret 以外の overrides には、user-unit drop-in を使用してください。
+生成されるuser unitには、意図的に`EnvironmentFile=`もsecretも含めません。secret以外のoverridesには、user-unit drop-inを使用してください。
 
 ```ini
 [Service]
@@ -247,7 +246,7 @@ Environment=CODEX_BRIDGE_PORT=8646
 ```bash
 install -d -m 700 "$HOME/.config/codex-openai-bridge"
 umask 077
-"$HOME/src/codex-openai-bridge/.venv/bin/python" -c \
+uv run python -c \
   'import secrets,sys; sys.stdout.write(secrets.token_urlsafe(32) + "\n")' \
   > "$HOME/.config/codex-openai-bridge/client-token"
 chmod 600 "$HOME/.config/codex-openai-bridge/client-token"
@@ -257,7 +256,7 @@ chmod 600 "$HOME/.config/codex-openai-bridge/client-token"
 
 ```bash
 umask 077
-"$HOME/src/codex-openai-bridge/.venv/bin/python" -c \
+uv run python -c \
   'import secrets,sys; sys.stdout.write(secrets.token_urlsafe(32) + "\n")' \
   > "$HOME/.config/codex-openai-bridge/continuation-key"
 chmod 600 "$HOME/.config/codex-openai-bridge/continuation-key"
@@ -275,19 +274,31 @@ consumer設定では`client-token`だけを参照するか、その値をconsume
 
 host には user manager が必要です。logout/boot 後も動作を継続するには、さらに linger が必要です（`loginctl show-user "$USER" -p Linger`）。linger の有効化には administrator が必要な場合があります。
 
-使用中の port で起動しないよう、検証してからインストールします。
+任意のabsolute checkout pathからlocked environmentを同期し、実行fileとCodex pathを固定した
+machine-local unitを生成します。
 
 ```bash
-cd "$HOME/src/codex-openai-bridge"
+cd /path/to/codex-openai-bridge
 uv sync --locked
-systemd-analyze --user verify deploy/systemd/codex-openai-bridge.service
-install -Dm644 deploy/systemd/codex-openai-bridge.service \
-  "$HOME/.config/systemd/user/codex-openai-bridge.service"
+uv run python scripts/install_user_service.py \
+  --checkout "$PWD" \
+  --codex-path "$(command -v codex)"
 systemctl --user daemon-reload
 systemctl --user enable codex-openai-bridge.service
 ```
 
-repository に含まれる unit は systemd の `%h` specifier を使用しているため、この checkout が `$HOME/src/codex-openai-bridge` にあることを前提としています。別の場所にインストールする場合は、unit をコピーし、検証前に `WorkingDirectory` と `ExecStart` をその checkout の absolute paths に置き換えてください。
+installerは`deploy/systemd/codex-openai-bridge.service.in`をrenderし、生成unitを検証してから
+atomicにinstallします。serviceのstart、stop、enable、reloadを実行しません。既存unitは`--force`なしで
+置換しません。生成unitにはmachine-local absolute pathが含まれますが、repository templateにはcheckout
+locationを含めません。
+`--force`では単一のatomic exchangeで置換し、旧unitを表示されたhidden filenameで保持します。失敗時も、
+同時にpathnameが変更された可能性があるtemporary／unexpected entryを自動削除せず保持します。表示された
+fileの内容を確認してから手動で削除してください。
+`--force`成功後も、表示された旧unit fileを確認し、rollbackが不要になった場合にだけ手動で削除してください。
+失敗時は通常、到達可能なexact absolute pathを表示します。Concurrentなparent-directory renameによりabsolute
+pathを安全に特定できない場合は、stale pathを作らず
+`opened-parent(dev=...,ino=...)/<basename> (absolute location unavailable)`を表示します。手動削除の前に、
+表示されたdevice/inodeでdirectoryを特定し、basenameの内容を確認してください。
 
 起動前に、手動で起動したブリッジがあれば停止し、port 8646 が空いていることを確認します。
 
@@ -694,26 +705,49 @@ print(completion.choices[0].message.content)
 
 upgrade前にactiveなtoolまたはreasoning chainをすべて完了してください。旧no-map releaseのChat reasoning detail `cobr_r2_`はclient tokenで署名されていました。このrevisionはclientが生成できるそのauthorityを意図的に受理しません。Cutover前に完了できないchainは、旧opaque reasoning stateをreplayせず、upgrade後にfresh chainとして開始してください。
 
-1. credentials を記録せず、現在デプロイされている Git revision を記録します。
+1. credentialsを記録せず、現在デプロイされているGit revisionを記録します。upgrade前に現在install済みの検証済みunitをcheckout外へ保存します。これはinstaller導入前のrevisionへrollbackする際に必要なexact local executableとCodex pathを保持します。
 2. review済みrevisionを起動する前に`continuation-key`を生成して検証します。Owner管理のregular file、mode `0600`、link count 1、`client-token`と異なる値でなければなりません。上の**設定**にある生成手順を使用してください。
 3. user service を停止し、listener がなくなったことを確認します。
 4. checkout をレビュー済みの revision に更新します。
-5. `uv sync --locked`、すべての test/type/lint gates、`systemd-analyze --user verify` を実行します。
+5. `uv sync --locked`、すべての test/type/lint gates、`uv run python scripts/verify_systemd_unit.py` を実行します。
 6. unit を再インストールし、`systemctl --user daemon-reload` を実行してから、起動して health/readiness/listener ownership を確認します。
 
 ```bash
-cd "$HOME/src/codex-openai-bridge"
+cd /path/to/codex-openai-bridge
+install -d -m 700 "$HOME/.config/codex-openai-bridge"
+install -m 600 "$HOME/.config/systemd/user/codex-openai-bridge.service" \
+  "$HOME/.config/codex-openai-bridge/rollback-codex-openai-bridge.service"
 systemctl --user stop codex-openai-bridge.service
 git switch --detach <reviewed-revision>
 uv sync --locked
-systemd-analyze --user verify deploy/systemd/codex-openai-bridge.service
-install -Dm644 deploy/systemd/codex-openai-bridge.service \
-  "$HOME/.config/systemd/user/codex-openai-bridge.service"
+uv run python scripts/install_user_service.py \
+  --checkout "$PWD" \
+  --codex-path "$(command -v codex)" \
+  --force
 systemctl --user daemon-reload
 systemctl --user start codex-openai-bridge.service
 ```
 
-rollback前に新しいrevisionで作成したactive chainを完了するか、rollback後にfresh chainとして開始してください。署名済みreasoning／continuation stateはこの署名authority境界を越えて移行できません。その後、以前に記録したreviewed revisionと対応するlockfile/unitを使用して同じ制限付き手順を繰り返します。異なるrevisionのsource、lockfile、virtual environment、unit definitionsを混在させないでください。bridge client token、server-only continuation key、OpenAI公式Codex CLI authentication stateはGit rollbackの対象ではありません。
+rollback前に新しいrevisionで作成したactive chainを完了するか、rollback後にfresh chainとして開始してください。署名済みreasoning／continuation stateはこの署名authority境界を越えて移行できません。記録済みrevisionへ切り替え、そのrevisionのlockfileを同期します。対象revisionが`install_user_service.py`より古い場合は、そのrevisionに存在しないscriptを実行せず、保存済みunitを復元します。それ以外は対象revisionのinstallerでunitを再生成します。異なるrevisionのsource、lockfile、virtual environment、unit definitionsを混在させないでください。bridge client token、server-only continuation key、OpenAI公式Codex CLI authentication stateはGit rollbackの対象ではありません。
+
+```bash
+cd /path/to/codex-openai-bridge
+systemctl --user stop codex-openai-bridge.service
+git switch --detach <previously-recorded-revision>
+uv sync --locked
+if test -f scripts/install_user_service.py; then
+  uv run python scripts/install_user_service.py \
+    --checkout "$PWD" \
+    --codex-path "$(command -v codex)" \
+    --force
+else
+  install -m 644 \
+    "$HOME/.config/codex-openai-bridge/rollback-codex-openai-bridge.service" \
+    "$HOME/.config/systemd/user/codex-openai-bridge.service"
+fi
+systemctl --user daemon-reload
+systemctl --user start codex-openai-bridge.service
+```
 
 ## 明示的に有効化する live tests
 

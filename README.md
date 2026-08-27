@@ -199,7 +199,7 @@ Responses request, function/custom tool, non-stream, and stream subset is tested
 - Codex OAuth credentials are read from the official Codex CLI file store through a bounded helper. The Codex CLI remains the only login and refresh authority; credentials are not copied into this repository or the systemd unit.
 - Upstream URL, authorization, account ID, model, prompts, tool arguments, and encrypted reasoning are excluded from operational logs and sanitized errors.
 - Request bodies, JSON structure, helper output, upstream bodies, SSE events/streams, queueing, concurrency, deadlines, and shutdown are bounded.
-- `ProtectHome=read-only` is relaxed only with `ReadWritePaths=%h/.codex` because the official Codex CLI may atomically refresh authentication state there. In systemd units, `%h` expands to the service user's home directory.
+- `ProtectHome=read-only` is relaxed only for the validated concrete `--codex-home` rendered into `ReadWritePaths=` because the official Codex CLI may atomically refresh authentication state there. The generated `CODEX_BRIDGE_CODEX_HOME` and `ReadWritePaths=` authorities are the same exact path.
 - The sandbox reduces accidental access and service compromise impact. It does not claim protection from every malicious process already running as the same Unix UID.
 - Do not expose port 8646 through a public reverse proxy. If a remote trusted consumer is required, use a separately reviewed authenticated tunnel and preserve the loopback bind.
 
@@ -208,9 +208,8 @@ Responses request, function/custom tool, non-stream, and stream subset is tested
 Create the environment and install the locked project:
 
 ```bash
-git clone https://github.com/itmst71/codex-openai-bridge.git \
-  "$HOME/src/codex-openai-bridge"
-cd "$HOME/src/codex-openai-bridge"
+git clone https://github.com/itmst71/codex-openai-bridge.git
+cd codex-openai-bridge
 uv sync --locked
 ```
 
@@ -258,7 +257,7 @@ Use the same alias for the complete tool, reasoning, or compaction continuation.
 
 These operator-defined aliases are not project support claims. Before assigning an alias to production work, independently live-verify that real model for every Chat, Responses, streaming, structured-output, tool, reasoning, and compaction surface that will use it.
 
-The checked-in user unit intentionally contains no `EnvironmentFile=` and no secret. For non-secret overrides, use a user-unit drop-in:
+The generated user unit intentionally contains no `EnvironmentFile=` and no secret. For non-secret overrides, use a user-unit drop-in:
 
 ```ini
 [Service]
@@ -274,7 +273,7 @@ Generate exactly 32 random bytes encoded as 43 unpadded URL-safe characters. Do 
 ```bash
 install -d -m 700 "$HOME/.config/codex-openai-bridge"
 umask 077
-"$HOME/src/codex-openai-bridge/.venv/bin/python" -c \
+uv run python -c \
   'import secrets,sys; sys.stdout.write(secrets.token_urlsafe(32) + "\n")' \
   > "$HOME/.config/codex-openai-bridge/client-token"
 chmod 600 "$HOME/.config/codex-openai-bridge/client-token"
@@ -284,7 +283,7 @@ Generate a second independent 43-character server-only continuation signing key.
 
 ```bash
 umask 077
-"$HOME/src/codex-openai-bridge/.venv/bin/python" -c \
+uv run python -c \
   'import secrets,sys; sys.stdout.write(secrets.token_urlsafe(32) + "\n")' \
   > "$HOME/.config/codex-openai-bridge/continuation-key"
 chmod 600 "$HOME/.config/codex-openai-bridge/continuation-key"
@@ -302,21 +301,33 @@ Point consumer configuration only at `client-token` or inject that value through
 
 The host must provide a user manager. Logout/boot persistence additionally requires linger (`loginctl show-user "$USER" -p Linger`). Enabling linger may require an administrator.
 
-Validate and install without starting over an occupied port:
+From any absolute checkout path, synchronize the locked environment and generate a machine-local
+unit with exact executable and Codex paths:
 
 ```bash
-cd "$HOME/src/codex-openai-bridge"
+cd /path/to/codex-openai-bridge
 uv sync --locked
-systemd-analyze --user verify deploy/systemd/codex-openai-bridge.service
-install -Dm644 deploy/systemd/codex-openai-bridge.service \
-  "$HOME/.config/systemd/user/codex-openai-bridge.service"
+uv run python scripts/install_user_service.py \
+  --checkout "$PWD" \
+  --codex-path "$(command -v codex)"
 systemctl --user daemon-reload
 systemctl --user enable codex-openai-bridge.service
 ```
 
-The checked-in unit uses systemd's `%h` specifier and therefore expects this checkout at
-`$HOME/src/codex-openai-bridge`. If you install it elsewhere, copy the unit and replace
-`WorkingDirectory` and `ExecStart` with absolute paths for that checkout before validation.
+The installer renders `deploy/systemd/codex-openai-bridge.service.in`, verifies the generated unit,
+and atomically installs it. It does not start, stop, enable, or reload the service. It refuses to
+replace an existing unit unless `--force` is supplied. The generated unit intentionally contains
+machine-local absolute paths; the repository template does not contain a checkout location.
+With `--force`, replacement uses one atomic exchange and retains the previous unit under the
+reported hidden filename. Failed installations likewise retain any temporary or unexpected entry
+instead of unlinking a pathname that may have changed concurrently; inspect the reported file and
+remove it manually only after confirming its contents.
+After a successful `--force`, inspect the reported previous-unit file and remove it manually only
+when rollback is no longer required. Failure output normally reports an exact reachable absolute
+path. If a concurrent parent-directory rename prevents that, it reports
+`opened-parent(dev=...,ino=...)/<basename> (absolute location unavailable)` instead of inventing a
+stale path; locate the directory by the reported device/inode and inspect the basename before any
+manual removal.
 
 Before starting, stop any manually launched bridge and prove port 8646 is free:
 
@@ -801,26 +812,49 @@ Keep `max_retries=0`: ambiguous automatic generation retries can duplicate outpu
 
 Before upgrading, finish every active tool or reasoning chain. Older no-map releases produced `cobr_r2_` Chat reasoning details signed with the client token. This revision deliberately does not accept that client-mintable authority. If a chain cannot be completed before the cutover, start a fresh chain after the upgrade instead of replaying its old opaque reasoning state.
 
-1. Record the currently deployed Git revision without recording credentials.
+1. Before upgrading, preserve the currently installed verified unit outside the checkout; it records the exact local executable and Codex paths needed to roll back to a revision that predates the installer. Also record the currently deployed Git revision without recording credentials.
 2. Generate and verify `continuation-key` before starting the reviewed revision. It must be an owner-controlled regular file with mode `0600`, one link, and a value that differs from `client-token`; use the generation block in **Configuration** above.
 3. Stop the user service and confirm its listener is gone.
 4. Update the checkout to the reviewed revision.
-5. Run `uv sync --locked`, the full test/type/lint gates, and `systemd-analyze --user verify`.
+5. Run `uv sync --locked`, the full test/type/lint gates, and `uv run python scripts/verify_systemd_unit.py`.
 6. Reinstall the unit, run `systemctl --user daemon-reload`, then start and verify health/readiness/listener ownership.
 
 ```bash
-cd "$HOME/src/codex-openai-bridge"
+cd /path/to/codex-openai-bridge
+install -d -m 700 "$HOME/.config/codex-openai-bridge"
+install -m 600 "$HOME/.config/systemd/user/codex-openai-bridge.service" \
+  "$HOME/.config/codex-openai-bridge/rollback-codex-openai-bridge.service"
 systemctl --user stop codex-openai-bridge.service
 git switch --detach <reviewed-revision>
 uv sync --locked
-systemd-analyze --user verify deploy/systemd/codex-openai-bridge.service
-install -Dm644 deploy/systemd/codex-openai-bridge.service \
-  "$HOME/.config/systemd/user/codex-openai-bridge.service"
+uv run python scripts/install_user_service.py \
+  --checkout "$PWD" \
+  --codex-path "$(command -v codex)" \
+  --force
 systemctl --user daemon-reload
 systemctl --user start codex-openai-bridge.service
 ```
 
-Before rollback, finish active chains created by the newer revision or plan to start a fresh chain after rollback; signed reasoning or continuation state is not portable across this signing-authority boundary. Then repeat the same bounded procedure with the previously recorded reviewed revision and its matching lockfile/unit. Do not mix source, lockfile, virtual environment, and unit definitions from different revisions. The bridge client token, server-only continuation key, and official Codex CLI authentication state are not part of a Git rollback.
+Before rollback, finish active chains created by the newer revision or plan to start a fresh chain after rollback; signed reasoning or continuation state is not portable across this signing-authority boundary. Switch to the recorded revision and synchronize its matching lockfile. If the target revision predates `install_user_service.py`, restore the preserved unit instead of invoking a script that revision does not contain. Otherwise render the target revision's unit normally. Do not mix source, lockfile, virtual environment, and unit definitions from different revisions. The bridge client token, server-only continuation key, and official Codex CLI authentication state are not part of a Git rollback.
+
+```bash
+cd /path/to/codex-openai-bridge
+systemctl --user stop codex-openai-bridge.service
+git switch --detach <previously-recorded-revision>
+uv sync --locked
+if test -f scripts/install_user_service.py; then
+  uv run python scripts/install_user_service.py \
+    --checkout "$PWD" \
+    --codex-path "$(command -v codex)" \
+    --force
+else
+  install -m 644 \
+    "$HOME/.config/codex-openai-bridge/rollback-codex-openai-bridge.service" \
+    "$HOME/.config/systemd/user/codex-openai-bridge.service"
+fi
+systemctl --user daemon-reload
+systemctl --user start codex-openai-bridge.service
+```
 
 ## Opt-in live tests
 

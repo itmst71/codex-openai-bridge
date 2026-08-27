@@ -5,16 +5,15 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/src/codex-openai-bridge
-ExecStart=%h/src/codex-openai-bridge/.venv/bin/codex-openai-bridge serve
-Environment=CODEX_BRIDGE_HOST=127.0.0.1 PYTHONPATH=
+ExecStart=@BRIDGE_EXEC_START@
+Environment=@BRIDGE_ENVIRONMENT@
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.codex
+ReadWritePaths=@CODEX_HOME@
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0077
 
