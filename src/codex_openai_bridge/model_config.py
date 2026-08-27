@@ -18,23 +18,40 @@ class ModelConfigurationError(ValueError):
     """Raised when the model routing authority is unavailable or invalid."""
 
 
+def _validate_directory(descriptor: int) -> None:
+    metadata = os.fstat(descriptor)
+    writable_by_others = bool(stat.S_IMODE(metadata.st_mode) & 0o022)
+    sticky_directory = bool(metadata.st_mode & stat.S_ISVTX)
+    if not stat.S_ISDIR(metadata.st_mode) or (writable_by_others and not sticky_directory):
+        raise ValueError
+
+
 def _open_directory_without_symlinks(path: Path) -> int:
-    descriptor = os.open("/", os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError
+    components = path.parts[1:]
+    if not components:
+        return os.open("/", os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+    descriptor = os.open(
+        Path("/") / components[0],
+        os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
     try:
-        for component in path.parts[1:]:
+        _validate_directory(descriptor)
+        for component in components[1:]:
             child = os.open(
                 component,
                 os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
                 dir_fd=descriptor,
             )
+            try:
+                _validate_directory(child)
+            except BaseException:
+                os.close(child)
+                raise
             previous = descriptor
             descriptor = child
             os.close(previous)
-            metadata = os.fstat(descriptor)
-            writable_by_others = bool(stat.S_IMODE(metadata.st_mode) & 0o022)
-            sticky_directory = bool(metadata.st_mode & stat.S_ISVTX)
-            if writable_by_others and not sticky_directory:
-                raise ValueError
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -47,27 +64,35 @@ def model_map_entry_exists(path: Path) -> bool:
         raise ModelConfigurationError("model configuration is unavailable")
     descriptor = -1
     try:
-        descriptor = os.open("/", os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
-        for component in path.parent.parts[1:]:
+        components = path.parent.parts[1:]
+        if components:
             try:
-                metadata = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+                descriptor = os.open(
+                    Path("/") / components[0],
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+                )
             except FileNotFoundError:
                 return False
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise ValueError
-            child = os.open(
-                component,
-                os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
-                dir_fd=descriptor,
-            )
+            _validate_directory(descriptor)
+        else:
+            descriptor = os.open("/", os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+        for component in components[1:]:
+            try:
+                child = os.open(
+                    component,
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                return False
+            try:
+                _validate_directory(child)
+            except BaseException:
+                os.close(child)
+                raise
             previous = descriptor
             descriptor = child
             os.close(previous)
-            metadata = os.fstat(descriptor)
-            writable_by_others = bool(stat.S_IMODE(metadata.st_mode) & 0o022)
-            sticky_directory = bool(metadata.st_mode & stat.S_ISVTX)
-            if writable_by_others and not sticky_directory:
-                raise ValueError
         try:
             os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
         except FileNotFoundError:
