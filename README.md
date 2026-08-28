@@ -225,6 +225,15 @@ The service reads validated environment variables. Important settings and defaul
 | `CODEX_BRIDGE_UPSTREAM_MODEL` | project default | Legacy single-alias model; rejected when a model map is present |
 | `CODEX_BRIDGE_CODEX_PATH` | `$HOME/.local/bin/codex` | Absolute path to the official Codex CLI executable |
 | `CODEX_BRIDGE_CODEX_HOME` | `$HOME/.codex` | Absolute Codex CLI home containing file-mode `auth.json` |
+| `CODEX_BRIDGE_MAX_REQUEST_BODY_BYTES` | `16 MiB` | Maximum accepted request body; configurable up to 32 MiB |
+| `CODEX_BRIDGE_MAX_STRING_BYTES` | `1 MiB` | Maximum UTF-8 size of one JSON string; configurable up to 2 MiB |
+| `CODEX_BRIDGE_MAX_JSON_NODES` | `100,000` | Maximum validated JSON nodes; configurable up to 200,000 |
+| `CODEX_BRIDGE_MAX_MESSAGES` | `1,024` | Maximum request messages/items; configurable up to 2,048 |
+| `CODEX_BRIDGE_MAX_TOOLS` | `256` | Maximum request tools; configurable up to 512 |
+| `CODEX_BRIDGE_MAX_JSON_DEPTH` | `32` | Maximum JSON nesting depth; configurable up to 64 |
+| `CODEX_BRIDGE_MAX_UPSTREAM_BODY_BYTES` | `16 MiB` | Maximum non-streaming upstream response body; configurable up to 32 MiB |
+| `CODEX_BRIDGE_MAX_SSE_EVENT_BYTES` | `1 MiB` | Maximum upstream SSE event; configurable up to 2 MiB |
+| `CODEX_BRIDGE_MAX_STREAM_BYTES` | `32 MiB` | Maximum total upstream stream; configurable up to 64 MiB |
 | `CODEX_BRIDGE_MAX_IN_FLIGHT` | `2` | Bounded concurrent owners, maximum 10 |
 | `CODEX_BRIDGE_QUEUE_WAIT_SECONDS` | `10` | Bounded admission wait |
 | `CODEX_BRIDGE_TOTAL_REQUEST_DEADLINE_SECONDS` | `240` | Whole request, including downstream writes |

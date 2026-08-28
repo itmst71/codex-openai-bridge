@@ -13,17 +13,17 @@ MIB = 1024 * 1024
 
 INTEGER_LIMITS = [
     ("CODEX_BRIDGE_PORT", 1, 65_535),
-    ("CODEX_BRIDGE_MAX_REQUEST_BODY_BYTES", 1, 16 * MIB),
+    ("CODEX_BRIDGE_MAX_REQUEST_BODY_BYTES", 1, 32 * MIB),
     ("CODEX_BRIDGE_MAX_JSON_DEPTH", 1, 64),
-    ("CODEX_BRIDGE_MAX_JSON_NODES", 1, 100_000),
-    ("CODEX_BRIDGE_MAX_MESSAGES", 1, 1_024),
-    ("CODEX_BRIDGE_MAX_TOOLS", 1, 256),
-    ("CODEX_BRIDGE_MAX_STRING_BYTES", 1, MIB),
+    ("CODEX_BRIDGE_MAX_JSON_NODES", 1, 200_000),
+    ("CODEX_BRIDGE_MAX_MESSAGES", 1, 2_048),
+    ("CODEX_BRIDGE_MAX_TOOLS", 1, 512),
+    ("CODEX_BRIDGE_MAX_STRING_BYTES", 1, 2 * MIB),
     ("CODEX_BRIDGE_MAX_HELPER_STDOUT_BYTES", 1, 64 * 1024),
     ("CODEX_BRIDGE_MAX_HELPER_STDERR_BYTES", 1, 64 * 1024),
-    ("CODEX_BRIDGE_MAX_UPSTREAM_BODY_BYTES", 1, 64 * MIB),
-    ("CODEX_BRIDGE_MAX_SSE_EVENT_BYTES", 1, 4 * MIB),
-    ("CODEX_BRIDGE_MAX_STREAM_BYTES", 1, 128 * MIB),
+    ("CODEX_BRIDGE_MAX_UPSTREAM_BODY_BYTES", 1, 32 * MIB),
+    ("CODEX_BRIDGE_MAX_SSE_EVENT_BYTES", 1, 2 * MIB),
+    ("CODEX_BRIDGE_MAX_STREAM_BYTES", 1, 64 * MIB),
     ("CODEX_BRIDGE_MAX_IN_FLIGHT", 1, 10),
 ]
 
@@ -44,12 +44,12 @@ def test_default_settings_match_bounded_runtime_contract() -> None:
     assert settings.port == 8646
     assert settings.public_model == "codex"
     assert settings.upstream_model == "gpt-5.6-terra"
-    assert settings.max_request_body_bytes == MIB
+    assert settings.max_request_body_bytes == 16 * MIB
     assert settings.max_json_depth == 32
-    assert settings.max_json_nodes == 20_000
-    assert settings.max_messages == 512
-    assert settings.max_tools == 128
-    assert settings.max_string_bytes == 256 * 1024
+    assert settings.max_json_nodes == 100_000
+    assert settings.max_messages == 1_024
+    assert settings.max_tools == 256
+    assert settings.max_string_bytes == MIB
     assert settings.max_helper_stdout_bytes == 16 * 1024
     assert settings.max_helper_stderr_bytes == 16 * 1024
     assert settings.helper_deadline_seconds == 30.0

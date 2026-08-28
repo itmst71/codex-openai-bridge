@@ -248,16 +248,19 @@ class Settings:
                 Path.home() / ".config" / "codex-openai-bridge" / "continuation-key",
             ),
             max_request_body_bytes=_bounded_int(
-                "CODEX_BRIDGE_MAX_REQUEST_BODY_BYTES", _MIB, minimum=1, maximum=16 * _MIB
+                "CODEX_BRIDGE_MAX_REQUEST_BODY_BYTES",
+                16 * _MIB,
+                minimum=1,
+                maximum=32 * _MIB,
             ),
             max_json_depth=_bounded_int("CODEX_BRIDGE_MAX_JSON_DEPTH", 32, minimum=1, maximum=64),
             max_json_nodes=_bounded_int(
-                "CODEX_BRIDGE_MAX_JSON_NODES", 20_000, minimum=1, maximum=100_000
+                "CODEX_BRIDGE_MAX_JSON_NODES", 100_000, minimum=1, maximum=200_000
             ),
-            max_messages=_bounded_int("CODEX_BRIDGE_MAX_MESSAGES", 512, minimum=1, maximum=1_024),
-            max_tools=_bounded_int("CODEX_BRIDGE_MAX_TOOLS", 128, minimum=1, maximum=256),
+            max_messages=_bounded_int("CODEX_BRIDGE_MAX_MESSAGES", 1_024, minimum=1, maximum=2_048),
+            max_tools=_bounded_int("CODEX_BRIDGE_MAX_TOOLS", 256, minimum=1, maximum=512),
             max_string_bytes=_bounded_int(
-                "CODEX_BRIDGE_MAX_STRING_BYTES", 256 * 1024, minimum=1, maximum=_MIB
+                "CODEX_BRIDGE_MAX_STRING_BYTES", _MIB, minimum=1, maximum=2 * _MIB
             ),
             max_helper_stdout_bytes=_bounded_int(
                 "CODEX_BRIDGE_MAX_HELPER_STDOUT_BYTES",
@@ -278,13 +281,13 @@ class Settings:
                 "CODEX_BRIDGE_MAX_UPSTREAM_BODY_BYTES",
                 16 * _MIB,
                 minimum=1,
-                maximum=64 * _MIB,
+                maximum=32 * _MIB,
             ),
             max_sse_event_bytes=_bounded_int(
-                "CODEX_BRIDGE_MAX_SSE_EVENT_BYTES", _MIB, minimum=1, maximum=4 * _MIB
+                "CODEX_BRIDGE_MAX_SSE_EVENT_BYTES", _MIB, minimum=1, maximum=2 * _MIB
             ),
             max_stream_bytes=_bounded_int(
-                "CODEX_BRIDGE_MAX_STREAM_BYTES", 32 * _MIB, minimum=1, maximum=128 * _MIB
+                "CODEX_BRIDGE_MAX_STREAM_BYTES", 32 * _MIB, minimum=1, maximum=64 * _MIB
             ),
             max_in_flight=_bounded_int("CODEX_BRIDGE_MAX_IN_FLIGHT", 2, minimum=1, maximum=10),
             queue_wait_seconds=_bounded_float(
