@@ -46,6 +46,15 @@ chmod 600 "$HOME/.codex/auth.json"
 維持し、issue、log、chat、このrepositoryへコピーしないでください。keyringと`auto` storageは
 このreleaseでは非対応です。Hermesは不要です。第三者agent frameworkも必要ありません。
 
+認証readerは、従来の3 fieldのChatGPT fileと、それに`"auth_mode": "chatgpt"`を加えた
+形式を受け付けます。ほかのmode、未知field、重複key、API key、account不一致は引き続き
+拒否します。CLIが管理する認証fileから`auth_mode`を削除しないでください。
+
+bridgeの仮想環境を作成したPython 3.12は削除しないでください。実行中のbridgeが残っていても、
+interpreterを削除すると新しい認証helperを起動できなくなります。processの生存とreadinessは
+別です。serviceを再起動する前に、installed Python 3.12と`uv.lock`から環境を再作成し、
+`/readyz`と実requestを確認してください。
+
 API key認証は意図的に非対応です。OpenAI API keyを利用する場合は、このbridgeを使わず
 公式OpenAI APIへ直接接続してください。API key fallbackやprovider切替は追加しません。
 

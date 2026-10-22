@@ -167,7 +167,13 @@ def _parse_auth_document(raw: bytes) -> Credential:
     document = json.loads(
         raw.decode("utf-8", errors="strict"), object_pairs_hook=_reject_duplicate_keys
     )
-    if type(document) is not dict or set(document) != {"OPENAI_API_KEY", "tokens", "last_refresh"}:
+    legacy_fields = {"OPENAI_API_KEY", "tokens", "last_refresh"}
+    if type(document) is not dict or set(document) not in (
+        legacy_fields,
+        legacy_fields | {"auth_mode"},
+    ):
+        raise ValueError
+    if "auth_mode" in document and document["auth_mode"] != "chatgpt":
         raise ValueError
     if document["OPENAI_API_KEY"] is not None:
         raise ValueError

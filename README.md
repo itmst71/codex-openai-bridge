@@ -50,6 +50,15 @@ and never copy it into issues, logs, chat, or this repository.
 Keyring and `auto` storage are not supported by this release. Hermes is not required;
 no third-party agent framework is required.
 
+The credential reader accepts the original three-field ChatGPT file and the same file with
+`"auth_mode": "chatgpt"`. Other modes, unknown fields, duplicate keys, API keys, and account
+mismatches remain rejected. Do not edit the CLI-owned credential file to remove `auth_mode`.
+
+Keep the Python 3.12 interpreter used to create the bridge virtual environment installed.
+A running bridge can survive removal of that interpreter while new credential helpers fail;
+process liveness is not readiness. Recreate the environment from `uv.lock` with an installed
+Python 3.12 before restarting the service, then verify `/readyz` and a real request.
+
 API-key authentication is intentionally unsupported. If you have an OpenAI API key,
 use the official OpenAI API directly without this bridge; this project will not add an API-key
 fallback or provider switch.

@@ -54,11 +54,20 @@ def _write_auth(codex_home: Path, document: dict[str, object] | None = None) -> 
     return path
 
 
-def test_reads_exact_owner_file_mode_chatgpt_credential(tmp_path: Path) -> None:
+@pytest.mark.parametrize("explicit_mode", [False, True], ids=["legacy", "explicit-chatgpt"])
+def test_reads_exact_owner_file_mode_chatgpt_credential(
+    tmp_path: Path, explicit_mode: bool
+) -> None:
     codex_home = tmp_path / "codex-home"
-    _write_auth(codex_home)
+    document = _document()
+    if explicit_mode:
+        document["auth_mode"] = "chatgpt"
+    auth = _write_auth(codex_home, document)
+    original_bytes = auth.read_bytes()
 
     credential = read_codex_file_credential(codex_home)
+
+    assert auth.read_bytes() == original_bytes
 
     assert credential.access_token == _jwt("acct-synthetic")
     assert credential.account_id == "acct-synthetic"
@@ -75,16 +84,43 @@ def test_reads_exact_owner_file_mode_chatgpt_credential(tmp_path: Path) -> None:
         lambda value: value["tokens"].__setitem__("account_id", "acct-other"),
     ],
 )
+@pytest.mark.parametrize("explicit_mode", [False, True])
 def test_rejects_api_key_extra_fields_and_account_mismatch(
     tmp_path: Path,
     mutation: object,
+    explicit_mode: bool,
 ) -> None:
     codex_home = tmp_path / "codex-home"
     document = _document()
+    if explicit_mode:
+        document["auth_mode"] = "chatgpt"
     mutation(document)  # type: ignore[operator]
     _write_auth(codex_home, document)
 
     with pytest.raises(CodexCredentialError, match="credentials are unavailable"):
+        read_codex_file_credential(codex_home)
+
+
+@pytest.mark.parametrize(
+    "mode", [None, True, 1, "", "api_key", "chatgptAuthTokens", "ChatGPT", [], {}]
+)
+def test_rejects_non_chatgpt_auth_mode(tmp_path: Path, mode: object) -> None:
+    codex_home = tmp_path / "codex-home"
+    document = _document()
+    document["auth_mode"] = mode
+    _write_auth(codex_home, document)
+
+    with pytest.raises(CodexCredentialError, match=r"^credentials are unavailable$"):
+        read_codex_file_credential(codex_home)
+
+
+def test_rejects_duplicate_auth_mode(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex-home"
+    auth = _write_auth(codex_home)
+    raw = json.dumps(_document())
+    auth.write_text(raw[:-1] + ', "auth_mode":"chatgpt", "auth_mode":"chatgpt"}')
+
+    with pytest.raises(CodexCredentialError, match=r"^credentials are unavailable$"):
         read_codex_file_credential(codex_home)
 
 
@@ -154,9 +190,12 @@ def _fake_codex(
     refreshed_account: str = "acct-synthetic",
     account_type: str = "chatgpt",
     notification: dict[str, object] | None = None,
+    explicit_mode: bool = False,
 ) -> Path:
     script = tmp_path / "codex"
     refreshed = _document(refreshed_account)
+    if explicit_mode:
+        refreshed["auth_mode"] = "chatgpt"
     refreshed_tokens = refreshed["tokens"]
     assert type(refreshed_tokens) is dict
     refreshed_tokens["access_token"] = _jwt(refreshed_account, exp=4_102_444_900)
@@ -194,19 +233,26 @@ for line in sys.stdin:
     return script
 
 
-def test_fresh_credential_does_not_spawn_codex(tmp_path: Path) -> None:
+@pytest.mark.parametrize("explicit_mode", [False, True])
+def test_fresh_credential_does_not_spawn_codex(tmp_path: Path, explicit_mode: bool) -> None:
     codex_home = tmp_path / "codex-home"
-    _write_auth(codex_home)
+    document = _document()
+    if explicit_mode:
+        document["auth_mode"] = "chatgpt"
+    _write_auth(codex_home, document)
 
     credential = resolve_codex_cli_credential(tmp_path / "missing-codex", codex_home)
 
     assert credential.account_id == "acct-synthetic"
 
 
-def test_force_refresh_uses_official_app_server_and_preserves_account(tmp_path: Path) -> None:
+@pytest.mark.parametrize("explicit_mode", [False, True])
+def test_force_refresh_uses_official_app_server_and_preserves_account(
+    tmp_path: Path, explicit_mode: bool
+) -> None:
     codex_home = tmp_path / "codex-home"
     _write_auth(codex_home)
-    codex = _fake_codex(tmp_path)
+    codex = _fake_codex(tmp_path, explicit_mode=explicit_mode)
 
     credential = resolve_codex_cli_credential(codex, codex_home, force_refresh=True)
 
@@ -286,6 +332,26 @@ def test_outer_helper_timeout_reaps_nested_app_server_process(tmp_path: Path) ->
                 os.kill(pid, 9)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize("explicit_mode", [False, True])
+def test_real_credential_helper_reads_both_chatgpt_formats(
+    tmp_path: Path, explicit_mode: bool
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    document = _document()
+    if explicit_mode:
+        document["auth_mode"] = "chatgpt"
+    auth = _write_auth(codex_home, document)
+    original_bytes = auth.read_bytes()
+    settings = replace(
+        Settings.from_env(), codex_home=codex_home, codex_path=tmp_path / "missing-codex"
+    )
+
+    credential = run_credential_helper(settings)
+
+    assert credential == read_codex_file_credential(codex_home)
+    assert auth.read_bytes() == original_bytes
 
 
 @pytest.mark.parametrize("argv,forced", [([], False), (["--force-refresh"], True)])
