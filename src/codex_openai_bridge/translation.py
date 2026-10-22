@@ -11,6 +11,7 @@ import time
 from collections.abc import AsyncIterable, AsyncIterator
 from copy import deepcopy
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Any, cast
 
 from codex_openai_bridge.continuation import ContinuationError, encode_continuation_id
@@ -257,11 +258,21 @@ class _ToolStreamItem:
 
 
 @dataclass(slots=True)
+class _SummaryStreamPart:
+    text: str = ""
+    text_bytes: int = 0
+    text_done: bool = False
+    part_done: bool = False
+
+
+@dataclass(slots=True)
 class _ReasoningStreamItem:
     output_index: int
     item_id: str
     provider_statusless: bool = False
     transient_encrypted_digest: bytes | None = None
+    snapshot_summary: bool = False
+    summary_parts: list[_SummaryStreamPart] = dataclass_field(default_factory=list)
     item_done: bool = False
 
 
@@ -339,16 +350,60 @@ def _empty_logprobs(value: object) -> bool:
     return value is None or (type(value) is list and not value)
 
 
-def _validate_stream_usage(value: object) -> StreamUsage:
+def _validate_usage_attribution(value: object) -> None:
+    """Validate private accounting, never treating it as terminal usage authority.
+
+    Callers must apply their JSON byte/tree bounds before this shape validation.
+    Item keys describe upstream input, not necessarily this turn's output items.
+    """
+    if type(value) is not dict or set(value) not in ({"items"}, {"items", "request_fields"}):
+        raise _invalid_stream()
+    items = value["items"]
+    request_fields = value.get("request_fields", {})
+    if (
+        type(items) is not dict
+        or type(request_fields) is not dict
+        or not set(request_fields) <= {"instructions", "tools", "text.format"}
+    ):
+        raise _invalid_stream()
+    counters = {"input_tokens", "cached_tokens", "cache_write_tokens", "output_tokens"}
+
+    def validate_counts(record: object, *, item: bool = False) -> None:
+        if type(record) is not dict or set(record) not in (
+            counters,
+            counters | {"content"} if item else counters,
+        ):
+            raise _invalid_stream()
+        for field in counters:
+            _nonnegative_int(record[field])
+
+    for item_id, item in items.items():
+        _stream_item_id(item_id)
+        validate_counts(item, item=True)
+        content = item.get("content", [])
+        if type(content) is not list:
+            raise _invalid_stream()
+        for part in content:
+            validate_counts(part)
+    for record in request_fields.values():
+        validate_counts(record)
+
+
+def _normalize_upstream_usage(value: object, *, require_details: bool = False) -> dict[str, Any]:
+    """Validate the closed usage shapes and copy only public token accounting."""
     if type(value) is not dict:
         raise _invalid_stream()
     base_fields = {"input_tokens", "output_tokens", "total_tokens"}
     detail_fields = {"input_tokens_details", "output_tokens_details"}
-    if set(value) not in (base_fields, base_fields | detail_fields):
+    if set(value) not in (
+        base_fields,
+        base_fields | detail_fields,
+        base_fields | detail_fields | {"attribution"},
+    ) or (require_details and not detail_fields <= set(value)):
         raise _invalid_stream()
-    prompt = _nonnegative_int(value["input_tokens"])
-    completion = _nonnegative_int(value["output_tokens"])
-    total = _nonnegative_int(value["total_tokens"])
+    normalized: dict[str, Any] = {field: _nonnegative_int(value[field]) for field in base_fields}
+    if "attribution" in value:
+        _validate_usage_attribution(value["attribution"])
     if detail_fields <= set(value):
         input_details = value["input_tokens_details"]
         output_details = value["output_tokens_details"]
@@ -367,7 +422,9 @@ def _validate_stream_usage(value: object) -> StreamUsage:
         if "cache_write_tokens" in input_details:
             _nonnegative_int(input_details["cache_write_tokens"])
         _nonnegative_int(output_details["reasoning_tokens"])
-    return StreamUsage(prompt, completion, total)
+        normalized["input_tokens_details"] = dict(input_details)
+        normalized["output_tokens_details"] = dict(output_details)
+    return normalized
 
 
 class _ResponsesStreamTranslator:
@@ -445,6 +502,7 @@ class _ResponsesStreamTranslator:
         self.last_sequence: int | None = None
         self.setup_events: set[str] = set()
         self.unknown_events = 0
+        self.summary_part_count = 0
         self.completed = False
         self.completed_response: dict[str, Any] | None = None
         self.saw_done = False
@@ -575,11 +633,36 @@ class _ResponsesStreamTranslator:
             raise _invalid_stream()
         return value
 
+    def _summary_text(self, value: object) -> str:
+        if type(value) is not str:
+            raise _invalid_stream()
+        try:
+            size = len(value.encode("utf-8", errors="strict"))
+        except UnicodeError:
+            raise _invalid_stream() from None
+        if size > self.max_string_bytes:
+            raise _invalid_stream()
+        return value
+
+    def _summary_part(self, value: object) -> str:
+        if (
+            type(value) is not dict
+            or set(value) != {"type", "text"}
+            or value["type"] != "summary_text"
+        ):
+            raise _invalid_stream()
+        return self._summary_text(value["text"])
+
     def _reasoning_item(
         self, value: object, *, status: str
     ) -> tuple[dict[str, Any], bool, bytes | None]:
         if type(value) is not dict:
             raise _invalid_stream()
+        summary = value.get("summary", [])
+        if type(summary) is not list or len(summary) > self.max_unknown_events:
+            raise _invalid_stream()
+        for part in summary:
+            self._summary_part(part)
         provider_fields = {"id", "type", "summary", "content", "encrypted_content"}
         if set(value) == provider_fields:
             item_id = _stream_item_id(value["id"])
@@ -588,7 +671,7 @@ class _ResponsesStreamTranslator:
             )
             if (
                 value["type"] != "reasoning"
-                or value["summary"] != []
+                or (status == "in_progress" and summary != [])
                 or value["content"] != []
                 or digest is None
             ):
@@ -597,7 +680,7 @@ class _ResponsesStreamTranslator:
                 "id": item_id,
                 "type": "reasoning",
                 "status": status,
-                "summary": [],
+                "summary": [{"type": "summary_text", "text": part["text"]} for part in summary],
             }
             if status == "completed":
                 projected["encrypted_content"] = value["encrypted_content"]
@@ -806,6 +889,7 @@ class _ResponsesStreamTranslator:
                 item_id=reasoning_id,
                 provider_statusless=provider_statusless,
                 transient_encrypted_digest=transient_digest,
+                snapshot_summary=bool(reasoning.get("summary")),
             )
             return ()
         if item_type == "custom_tool_call":
@@ -887,6 +971,70 @@ class _ResponsesStreamTranslator:
             )
             return ()
         raise _invalid_stream()
+
+    def _on_reasoning_summary(self, event: dict[str, Any]) -> tuple[bytes, ...]:
+        event_type = event["type"]
+        is_part = event_type in {
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_part.done",
+        }
+        is_delta = event_type == "response.reasoning_summary_text.delta"
+        value_field = "part" if is_part else "delta" if is_delta else "text"
+        _exact_fields(
+            event,
+            {"type", "sequence_number", "item_id", "output_index", "summary_index", value_field},
+            {"obfuscation"} if is_delta else set(),
+        )
+        output_index = self._validate_output_index(event)
+        summary_index = _nonnegative_int(event["summary_index"])
+        state = self.items_by_index.get(output_index)
+        if (
+            not isinstance(state, _ReasoningStreamItem)
+            or state.item_done
+            or state.snapshot_summary
+            or _nonempty_string(event["item_id"]) != state.item_id
+        ):
+            raise _invalid_stream()
+        text = (
+            self._summary_part(event[value_field])
+            if is_part
+            else self._summary_text(event[value_field])
+        )
+        if event_type == "response.reasoning_summary_part.added":
+            if (
+                text != ""
+                or summary_index != len(state.summary_parts)
+                or (state.summary_parts and not state.summary_parts[-1].part_done)
+                or self.summary_part_count >= self.max_unknown_events
+            ):
+                raise _invalid_stream()
+            # The existing JSON-node budget also caps parts retained across SSE events.
+            self.summary_part_count += 1
+            state.summary_parts.append(_SummaryStreamPart())
+            return ()
+        if summary_index >= len(state.summary_parts):
+            raise _invalid_stream()
+        part = state.summary_parts[summary_index]
+        if part.part_done:
+            raise _invalid_stream()
+        if is_delta:
+            if "obfuscation" in event:
+                self._summary_text(event["obfuscation"])
+            size = len(text.encode("utf-8", errors="strict"))
+            if part.text_done or size > self.max_string_bytes - part.text_bytes:
+                raise _invalid_stream()
+            part.text += text
+            part.text_bytes += size
+        elif event_type == "response.reasoning_summary_text.done":
+            if part.text_done or text != part.text:
+                raise _invalid_stream()
+            part.text_done = True
+        else:
+            if not part.text_done or text != part.text:
+                raise _invalid_stream()
+            part.part_done = True
+        # Chat never publishes plaintext summaries; Responses applies request permission.
+        return ()
 
     def _matching_text_event(self, event: dict[str, Any]) -> _TextStreamItem:
         state = self.text_item
@@ -1107,10 +1255,21 @@ class _ResponsesStreamTranslator:
                 or provider_statusless != state.provider_statusless
             ):
                 raise _invalid_stream()
+            if state.summary_parts or provider_statusless:
+                summary = [
+                    {"type": "summary_text", "text": part.text} for part in state.summary_parts
+                ]
+                if any(not part.part_done for part in state.summary_parts) or not (
+                    _json_type_exact_equal(projected_item.get("summary"), summary)
+                ):
+                    raise _invalid_stream()
             if provider_statusless:
                 if (
                     provider_digest is None
-                    or provider_digest == state.transient_encrypted_digest
+                    or (
+                        provider_digest in self.transient_reasoning_digests
+                        and provider_digest != state.transient_encrypted_digest
+                    )
                     or provider_digest in self.encrypted_digests
                 ):
                     raise _invalid_stream()
@@ -1122,7 +1281,11 @@ class _ResponsesStreamTranslator:
                         encrypted_content,
                         max_string_bytes=self.max_string_bytes,
                     )
-                    if digest is None or digest in self.encrypted_digests:
+                    if (
+                        digest is None
+                        or digest in self.encrypted_digests
+                        or digest in self.transient_reasoning_digests
+                    ):
                         raise _invalid_stream()
                     self.encrypted_digests.add(digest)
             state.item_done = True
@@ -1203,7 +1366,12 @@ class _ResponsesStreamTranslator:
             for index, item in enumerate(output):
                 if not _json_type_exact_equal(item, self.done_items[index]):
                     raise _invalid_stream()
-        self.usage = _validate_stream_usage(usage)
+        normalized_usage = _normalize_upstream_usage(usage)
+        self.usage = StreamUsage(
+            normalized_usage["input_tokens"],
+            normalized_usage["output_tokens"],
+            normalized_usage["total_tokens"],
+        )
         if self.compaction_count and (
             self.compaction_count != 2
             or self.text_item is None
@@ -1230,6 +1398,7 @@ class _ResponsesStreamTranslator:
         ):
             raise _invalid_stream()
         self.completed_response = dict(response)
+        self.completed_response["usage"] = normalized_usage
         self.completed_response["output"] = [
             deepcopy(self.projected_done_items[index]) for index in range(self.next_output_index)
         ]
@@ -1267,12 +1436,26 @@ class _ResponsesStreamTranslator:
         event = parsed.data
         self._validate_sequence(event)
         event_type = event["type"]
+        if "safety_buffering" in event:
+            if type(event["safety_buffering"]) is not bool or event_type not in {
+                "response.created",
+                "response.in_progress",
+                "response.output_text.delta",
+                "response.completed",
+            }:
+                raise _invalid_stream()
+            # Strip only this observed transport field; all handler schemas remain closed.
+            event = {key: value for key, value in event.items() if key != "safety_buffering"}
         handlers = {
             "response.output_item.added": self._on_output_added,
             "response.content_part.added": self._on_content_added,
             "response.output_text.delta": self._on_text_delta,
             "response.output_text.done": self._on_text_done,
             "response.content_part.done": self._on_content_done,
+            "response.reasoning_summary_part.added": self._on_reasoning_summary,
+            "response.reasoning_summary_text.delta": self._on_reasoning_summary,
+            "response.reasoning_summary_text.done": self._on_reasoning_summary,
+            "response.reasoning_summary_part.done": self._on_reasoning_summary,
             "response.function_call_arguments.delta": self._on_arguments_delta,
             "response.function_call_arguments.done": self._on_arguments_done,
             "response.custom_tool_call_input.delta": self._on_custom_input_delta,
@@ -1300,7 +1483,7 @@ class _ResponsesStreamTranslator:
         handler = handlers.get(event_type)
         if handler is not None:
             return handler(event)
-        if self.custom_tool_name is not None:
+        if self.custom_tool_name is not None or event_type.startswith("response.reasoning_summary"):
             raise _invalid_stream()
         if any(token in event_type for token in ("completed", "failed", "incomplete", ".done")):
             raise _invalid_stream()
@@ -1535,12 +1718,6 @@ def chat_request_to_responses(
     return payload
 
 
-def _exact_nonnegative_int(value: object) -> int:
-    if type(value) is not int or value < 0:
-        raise UpstreamResponseError("invalid upstream response")
-    return value
-
-
 def _reject_json_constant(_value: str) -> None:
     raise ValueError
 
@@ -1751,9 +1928,13 @@ def responses_to_chat_completion(
                     raise UpstreamResponseError("invalid upstream response")
                 text_parts.append(text)
 
-        prompt_tokens = _exact_nonnegative_int(usage.get("input_tokens"))
-        completion_tokens = _exact_nonnegative_int(usage.get("output_tokens"))
-        total_tokens = _exact_nonnegative_int(usage.get("total_tokens"))
+        _validate_stream_json_tree(
+            usage,
+            max_depth=max_json_depth,
+            max_nodes=max_json_nodes,
+            max_string_bytes=max_string_bytes,
+        )
+        normalized_usage = _normalize_upstream_usage(usage)
     except (KeyError, TypeError):
         raise UpstreamResponseError("invalid upstream response") from None
 
@@ -1834,8 +2015,8 @@ def responses_to_chat_completion(
             }
         ],
         "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
+            "prompt_tokens": normalized_usage["input_tokens"],
+            "completion_tokens": normalized_usage["output_tokens"],
+            "total_tokens": normalized_usage["total_tokens"],
         },
     }

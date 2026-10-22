@@ -137,6 +137,31 @@ OpenAI SDK release. Unknown fields, unproven enum values, stateful features, con
 snapshots, and malformed or expanded tool authority are rejected before they can become silent
 compatibility drift.
 
+Observed upstream metadata is accepted only in closed shapes: boolean `safety_buffering`
+on `response.created`, `response.in_progress`, `response.output_text.delta`, and
+`response.completed`, plus bounded `usage.attribution` item/content and `instructions`/`tools`/`text.format`
+token accounting with exact nonnegative integer counters. Per-item `content` and the
+`request_fields` map may be absent, as observed for tool items and empty instructions.
+These private fields are validated
+then stripped from Chat/Responses output and continuation; terminal usage remains authoritative.
+The existing bounded unknown-event policy for `response.metadata` is unchanged.
+
+Statusless reasoning may keep the same encrypted blob from its added event to its matching
+done event. Item identity and completion are still required; historical or cross-item encrypted
+blob reuse remains rejected, and unfinished reasoning is never promoted to completed authority.
+
+Requested reasoning summaries support the strict `response.reasoning_summary_part.added`,
+`response.reasoning_summary_text.delta`, `response.reasoning_summary_text.done`, and
+`response.reasoning_summary_part.done` lifecycle. Item/output/summary indices, accumulated
+UTF-8 text, both done snapshots, and terminal item summaries must agree within the existing
+JSON/string/stream budgets. Missing, duplicate, out-of-order, or late lifecycle events fail
+closed. Statusless reasoning still requires empty `content`; its summaries must be verified
+through this lifecycle. Existing statusful summary snapshots without summary events remain
+supported. Only explicitly requested summaries enter public Responses output, with the same
+model-bound item identifiers; Chat never exposes summary plaintext. Optional delta
+`obfuscation` is bounded and stripped. Cross-item encrypted-state reuse is also rejected
+when statusless and statusful reasoning items are mixed.
+
 ```mermaid
 flowchart LR
     request["Client request"]

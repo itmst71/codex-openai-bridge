@@ -34,6 +34,10 @@ _KNOWN_EVENTS = frozenset(
         "response.output_text.delta",
         "response.output_text.done",
         "response.content_part.done",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.reasoning_summary_part.done",
         "response.function_call_arguments.delta",
         "response.function_call_arguments.done",
         "response.custom_tool_call_input.delta",
@@ -144,36 +148,19 @@ def _project_item(
     if item_type == "reasoning":
         provider_fields = {"id", "type", "summary", "content", "encrypted_content"}
         if set(value) == provider_fields:
-            if value["summary"] != [] or value["content"] != []:
+            if value["content"] != [] or (status == "in_progress" and value["summary"] != []):
                 raise _invalid()
-            raw_item_id = validate_responses_identifier(value["id"])
-            result: dict[str, Any] = {
-                "id": _public_model_scoped_state_id(
-                    raw_item_id,
-                    public_model=public_model,
-                    kind="responses_reasoning",
-                    binding_key=binding_key,
-                    model_scoped=model_scoped,
-                ),
-                "type": "reasoning",
-                "status": status,
-                "summary": [],
-            }
             encrypted_content = validate_encrypted_reasoning_content(
                 value["encrypted_content"], max_string_bytes=max_string_bytes
             )
+            value = {
+                "id": value["id"],
+                "type": "reasoning",
+                "status": status,
+                "summary": value["summary"],
+            }
             if status == "completed":
-                result["encrypted_content"] = _model_scoped_encrypted_state(
-                    encrypted_content,
-                    public_model=public_model,
-                    kind="responses_reasoning_state",
-                    binding_key=binding_key,
-                    max_string_bytes=max_string_bytes,
-                    model_scoped=model_scoped,
-                    item_id=raw_item_id,
-                    upstream=True,
-                )
-            return result
+                value["encrypted_content"] = encrypted_content
         required = {"id", "type", "status", "summary"}
         optional = {"encrypted_content"} if status == "completed" else set()
         if not required <= set(value) or not set(value) <= required | optional:
@@ -194,7 +181,7 @@ def _project_item(
         if summary and not allow_reasoning_summary:
             raise _invalid()
         raw_item_id = validate_responses_identifier(value["id"])
-        result = {
+        result: dict[str, Any] = {
             "id": _public_model_scoped_state_id(
                 raw_item_id,
                 public_model=public_model,
@@ -517,6 +504,32 @@ class ResponsesSseTranslator:
                     "type": event_type,
                     "output_index": event["output_index"],
                     "item": item,
+                    "sequence_number": sequence,
+                },
+            )
+        if event_type in {
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.done",
+            "response.reasoning_summary_part.done",
+        }:
+            if self._request.reasoning is None or self._request.reasoning.summary is None:
+                raise _invalid()
+            value_field = (
+                "part" if "part" in event else "delta" if event_type.endswith("delta") else "text"
+            )
+            return _frame(
+                event_type,
+                {
+                    "type": event_type,
+                    "item_id": self._public_item_id(event["item_id"]),
+                    "output_index": event["output_index"],
+                    "summary_index": event["summary_index"],
+                    value_field: (
+                        {"type": "summary_text", "text": event["part"]["text"]}
+                        if value_field == "part"
+                        else event[value_field]
+                    ),
                     "sequence_number": sequence,
                 },
             )

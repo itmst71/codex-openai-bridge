@@ -16,7 +16,7 @@ from codex_openai_bridge.continuation import (
     encode_continuation_id,
     encode_continuation_state,
 )
-from codex_openai_bridge.translation import UpstreamResponseError
+from codex_openai_bridge.translation import UpstreamResponseError, _normalize_upstream_usage
 from codex_openai_bridge.wire import (
     ChatRequestError,
     FunctionTool,
@@ -1353,25 +1353,6 @@ def validate_responses_identifier(value: object) -> str:
     return _identifier(value, upstream=True)
 
 
-def _usage_detail(
-    value: object,
-    field: str,
-    *,
-    optional_fields: frozenset[str] = frozenset(),
-) -> int:
-    if type(value) is not dict or field not in value or not set(value) <= {field, *optional_fields}:
-        raise UpstreamResponseError("invalid upstream response")
-    for optional_field in optional_fields:
-        if optional_field in value:
-            optional_value = value[optional_field]
-            if type(optional_value) is not int or optional_value < 0:
-                raise UpstreamResponseError("invalid upstream response")
-    candidate = value[field]
-    if type(candidate) is not int or candidate < 0:
-        raise UpstreamResponseError("invalid upstream response")
-    return candidate
-
-
 def responses_to_public(
     value: object,
     *,
@@ -1742,34 +1723,7 @@ def responses_to_public(
     ) and function_count == 0:
         raise UpstreamResponseError("invalid upstream response")
 
-    allowed_usage = {
-        "input_tokens",
-        "input_tokens_details",
-        "output_tokens",
-        "output_tokens_details",
-        "total_tokens",
-    }
-    if set(usage) != allowed_usage:
-        raise UpstreamResponseError("invalid upstream response")
-    exact_usage: dict[str, int] = {}
-    for field in ("input_tokens", "output_tokens", "total_tokens"):
-        candidate = usage[field]
-        if type(candidate) is not int or candidate < 0:
-            raise UpstreamResponseError("invalid upstream response")
-        exact_usage[field] = candidate
-    raw_input_token_details = usage["input_tokens_details"]
-    cached_tokens = _usage_detail(
-        raw_input_token_details,
-        "cached_tokens",
-        optional_fields=frozenset({"cache_write_tokens"}),
-    )
-    assert type(raw_input_token_details) is dict
-    public_input_token_details = {"cached_tokens": cached_tokens}
-    if "cache_write_tokens" in raw_input_token_details:
-        public_input_token_details["cache_write_tokens"] = raw_input_token_details[
-            "cache_write_tokens"
-        ]
-    reasoning_tokens = _usage_detail(usage["output_tokens_details"], "reasoning_tokens")
+    public_usage = _normalize_upstream_usage(usage, require_details=True)
 
     if request.custom_tool is not None:
         tools = [_custom_tool_payload(request.custom_tool)]
@@ -1799,11 +1753,5 @@ def responses_to_public(
         ),
         "tool_choice": choice if choice is not None else "auto",
         "tools": tools,
-        "usage": {
-            "input_tokens": exact_usage["input_tokens"],
-            "input_tokens_details": public_input_token_details,
-            "output_tokens": exact_usage["output_tokens"],
-            "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
-            "total_tokens": exact_usage["total_tokens"],
-        },
+        "usage": public_usage,
     }

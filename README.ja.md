@@ -128,6 +128,28 @@ bridgeはserverが承認したaliasだけを公開します。信頼されたサ
 
 互換性は、OpenAI SDK の各リリースに存在するすべての field ではなく、実際の Codex backend の挙動に従います。未知の fields、未検証の enum values、stateful features、矛盾する SSE snapshots、不正または拡張された tool authority は、互換性のずれが暗黙に生じる前に拒否されます。
 
+観測済み upstream metadata は限定した形状だけを受理します。`safety_buffering` は
+`response.created`、`response.in_progress`、`response.output_text.delta`、`response.completed`
+の boolean のみ、`usage.attribution` は既存の上限内の item/content と `instructions`/`tools`/`text.format` の
+厳密な非負整数カウンターのみです。tool itemや空のinstructionsで観測された、itemの`content`と
+`request_fields` mapの省略を許可します。検証後は Chat/Responses の公開出力・継続履歴から除外し、
+terminal usage の権威は変更しません。`response.metadata` に対する既存の上限付き未知イベント処理も変更しません。
+
+statusless reasoningは、同じitemのaddedとdoneで暗号化blobが変わらない形式も受理します。
+item identityと完了イベントは引き続き必須で、履歴や別itemのblob再利用は拒否します。
+未完了のreasoningを完了済みとして扱うことはありません。
+
+要求されたreasoning summaryは、`response.reasoning_summary_part.added`、
+`response.reasoning_summary_text.delta`、`response.reasoning_summary_text.done`、
+`response.reasoning_summary_part.done`の厳密なライフサイクルをサポートします。
+item/output/summaryの各index、蓄積したUTF-8 text、両done snapshot、終端itemのsummaryは、
+既存のJSON/string/stream上限内で一致する必要があります。欠落・重複・順序違反・完了後のイベントは拒否します。
+statusless reasoningの`content`は引き続き空配列のみで、summaryは上記イベントで検証します。
+summaryイベントを伴わない既存のstatusful snapshot形式は維持します。
+明示的に要求されたsummaryだけを同じmodel-bound item IDでResponsesに公開し、Chatには平文を出しません。
+deltaの任意`obfuscation`は上限付きで検証後に除外します。
+statusless/statusfulが混在する場合も、別itemの暗号化state再利用を拒否します。
+
 ```mermaid
 flowchart LR
     request["クライアント request"]
