@@ -1360,7 +1360,7 @@ async def test_direct_stream_custom_tool_ids_are_model_alias_bound() -> None:
         "mixed_function",
         "mixed_compaction",
         "unknown_nonterminal_event",
-        "nonempty_completed_output",
+        "extra_completed_item",
         "contradictory_completed_output",
         "duplicate_history_item_id",
         "duplicate_history_call_id",
@@ -1467,13 +1467,15 @@ async def test_custom_tool_stream_rejects_malformed_lifecycle(invalid_case: str)
         )
     elif invalid_case == "unknown_nonterminal_event":
         events.insert(3, {"type": "response.future.delta", "secret": "SENSITIVE_UNKNOWN"})
-    elif invalid_case in {"nonempty_completed_output", "contradictory_completed_output"}:
+    elif invalid_case in {"extra_completed_item", "contradictory_completed_output"}:
         response = events[-1]["response"]
         done_item = events[5]["item"]
         assert isinstance(response, dict)
         assert isinstance(done_item, dict)
         response["output"] = [dict(done_item)]
-        if invalid_case == "contradictory_completed_output":
+        if invalid_case == "extra_completed_item":
+            response["output"].append(dict(done_item))
+        else:
             response["output"][0]["input"] = "contradiction"
     elif invalid_case == "duplicate_history_item_id":
         document["input"] = [

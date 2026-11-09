@@ -728,7 +728,7 @@ def test_service_tier_accepts_only_default_and_is_preserved() -> None:
 
 
 def test_context_management_accepts_one_bounded_compaction_entry_and_forwards_exactly() -> None:
-    for threshold in (1, 1024, 1_000_000):
+    for threshold in (1000, 1024, 1_000_000):
         context_management = [{"type": "compaction", "compact_threshold": threshold}]
         parsed = _parse_request(
             {
@@ -753,6 +753,8 @@ def test_context_management_accepts_one_bounded_compaction_entry_and_forwards_ex
         [],
         [{"type": "compaction", "compact_threshold": True}],
         [{"type": "compaction", "compact_threshold": 0}],
+        [{"type": "compaction", "compact_threshold": 1}],
+        [{"type": "compaction", "compact_threshold": 999}],
         [{"type": "compaction", "compact_threshold": -1}],
         [{"type": "compaction", "compact_threshold": 1_000_001}],
         [{"type": "compaction", "compact_threshold": "1024"}],

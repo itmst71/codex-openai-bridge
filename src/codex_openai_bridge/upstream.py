@@ -20,6 +20,7 @@ from codex_openai_bridge.translation import (
     UpstreamResponseError,
     parse_responses_sse,
 )
+from codex_openai_bridge.wire import encrypted_reasoning_data_digest
 
 _ORIGINATOR = "codex_cli_rs"
 _USER_AGENT = "codex_cli_rs/0.0.0"
@@ -170,6 +171,29 @@ def _named_custom_tool_from_payload(payload: dict[str, Any]) -> str | None:
     return name
 
 
+def _historical_encrypted_digests_from_payload(
+    payload: dict[str, Any], *, max_string_bytes: int
+) -> frozenset[bytes]:
+    items = payload.get("input")
+    if type(items) is not list:
+        return frozenset()
+    digests: set[bytes] = set()
+    for item in items:
+        if (
+            type(item) is not dict
+            or item.get("type") not in ("reasoning", "compaction")
+            or "encrypted_content" not in item
+        ):
+            continue
+        digest = encrypted_reasoning_data_digest(
+            item["encrypted_content"], max_string_bytes=max_string_bytes
+        )
+        if digest is None:
+            raise UpstreamResponseError("invalid upstream response")
+        digests.add(digest)
+    return frozenset(digests)
+
+
 class BufferedResponsesUpstream:
     """Expose public non-stream calls over the stream-only Codex backend."""
 
@@ -189,6 +213,9 @@ class BufferedResponsesUpstream:
         credential: Credential,
         payload: dict[str, Any],
     ) -> object:
+        initial_encrypted_digests = _historical_encrypted_digests_from_payload(
+            payload, max_string_bytes=self._settings.max_string_bytes
+        )
         streaming_payload = dict(payload)
         streaming_payload["stream"] = True
         streaming_payload["store"] = False
@@ -199,6 +226,7 @@ class BufferedResponsesUpstream:
             allow_compaction="context_management" in payload,
             max_unknown_events=self._settings.max_json_nodes,
             max_string_bytes=self._settings.max_string_bytes,
+            initial_encrypted_digests=initial_encrypted_digests,
             custom_tool_name=_named_custom_tool_from_payload(payload),
         )
         try:

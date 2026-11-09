@@ -192,8 +192,9 @@ The currently supported direct Responses request controls are:
 - `text.verbosity`: `low`, `medium`, or `high`, plus the documented JSON format subset;
 - function tools, or exactly one custom tool with an exact named choice and
   `parallel_tool_calls=false`;
-- `context_management=[{"type":"compaction","compact_threshold":N}]` with a bounded positive
-  threshold; compaction cannot be combined with function or custom tools because that cross-product
+- `context_management=[{"type":"compaction","compact_threshold":N}]` with
+  `1000 <= N <= 1000000`; smaller thresholds are rejected locally with HTTP 400 rather than
+  sent to the backend. Compaction cannot be combined with function or custom tools because that cross-product
   has not been proven against the backend;
 - `store=false` and `include=["reasoning.encrypted_content"]`; both policies are also forced
   upstream by the server.
@@ -215,11 +216,21 @@ Validated reasoning summaries are exposed only when the client explicitly reques
 `phase` is retained as a typed SDK 3.1.0 field and through `model_extra` in SDK 1.109.1.
 
 Custom-tool streaming normalizes the backend's exact item/input-delta lifecycle into SDK-shaped
-events, strips provider obfuscation metadata, and restores the terminal custom call when the
-backend's completed snapshot omits it. Only the validated both-present or both-null identifier
+events, strips provider obfuscation metadata, and accepts either an omitted terminal output or a
+snapshot exactly matching the completed items. Provider metadata events are identity-checked and
+discarded without publishing their contents. Only the validated both-present or both-null identifier
 variants are accepted; null identifiers are replaced with deterministic collision-checked public
 identifiers. When `stream_options.include_obfuscation=false`, an omitted provider obfuscation field
 is accepted while all present obfuscation values remain bounded and validated.
+
+Compaction checkpoints may finalize their encrypted content after the matching
+`response.compaction.compacting` transition. The item identity must remain fixed, the finalized
+state must not reuse another checkpoint or historical state, and the terminal snapshot must match
+the finalized items. A state change without that transition remains invalid.
+
+Standard SSE comment lines, including comment-only keepalive blocks, are discarded without
+publishing them or treating them as response events. They still consume the existing event/stream
+byte budgets and cannot replace a completed response or extend the overall request deadline.
 
 Offline contract tests run against the locked OpenAI Python SDK 1.109.1 and separately against
 OpenAI Python SDK 3.1.0. Native compaction has a typed SDK contract only in 3.1.0; the common

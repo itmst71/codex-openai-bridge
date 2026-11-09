@@ -32,8 +32,8 @@ from codex_openai_bridge.wire import (
 _PUBLIC_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
 _REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
 _REASONING_SUMMARIES = frozenset({"auto", "concise", "detailed"})
-# Covers the proven 1,024-token trigger and current large context windows while
-# keeping this client-controlled routing threshold finite without new configuration.
+# Match the provider's observed minimum and keep this client-controlled threshold finite.
+_MIN_COMPACT_THRESHOLD = 1000
 _MAX_COMPACT_THRESHOLD = 1_000_000
 
 
@@ -395,7 +395,7 @@ def _parse_context_management(value: object) -> CompactionContextManagement:
     if (
         entry["type"] != "compaction"
         or type(threshold) is not int
-        or not 1 <= threshold <= _MAX_COMPACT_THRESHOLD
+        or not _MIN_COMPACT_THRESHOLD <= threshold <= _MAX_COMPACT_THRESHOLD
     ):
         raise _invalid_request()
     return CompactionContextManagement(compact_threshold=threshold)

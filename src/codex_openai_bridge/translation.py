@@ -87,12 +87,20 @@ def _decode_sse_lines(
     max_json_depth: int,
     max_json_nodes: int,
     max_string_bytes: int,
-) -> ParsedSseEvent:
+) -> ParsedSseEvent | None:
     event_name: str | None = None
     data_payload: bytes | None = None
-    for index, line in enumerate(lines):
+    saw_comment = False
+    for line in lines:
+        if line.startswith(b":"):
+            try:
+                line.decode("utf-8", errors="strict")
+            except UnicodeError:
+                raise _invalid_stream() from None
+            saw_comment = True
+            continue
         if line.startswith(b"event:"):
-            if event_name is not None or data_payload is not None or index != 0:
+            if event_name is not None or data_payload is not None:
                 raise _invalid_stream()
             raw_name = line[6:]
             if raw_name.startswith(b" "):
@@ -117,6 +125,8 @@ def _decode_sse_lines(
             continue
         raise _invalid_stream()
     if data_payload is None:
+        if saw_comment and event_name is None:
+            return None
         raise _invalid_stream()
     if data_payload == b"[DONE]":
         if event_name is not None:
@@ -157,7 +167,7 @@ async def parse_responses_sse(
     max_json_nodes: int,
     max_string_bytes: int,
 ) -> AsyncIterator[ParsedSseEvent]:
-    """Parse strict single-data-field SSE over arbitrarily fragmented bytes."""
+    """Parse strict single-data-field SSE with bounded, nonsemantic comments."""
     limits = (
         max_sse_event_bytes,
         max_stream_bytes,
@@ -190,12 +200,14 @@ async def parse_responses_sse(
                 if not line:
                     if not lines:
                         raise _invalid_stream()
-                    yield _decode_sse_lines(
+                    parsed_event = _decode_sse_lines(
                         lines,
                         max_json_depth=max_json_depth,
                         max_json_nodes=max_json_nodes,
                         max_string_bytes=max_string_bytes,
                     )
+                    if parsed_event is not None:
+                        yield parsed_event
                     lines = []
                     event_size = 0
                     continue
@@ -212,12 +224,14 @@ async def parse_responses_sse(
                 if not line:
                     if not lines:
                         raise _invalid_stream()
-                    yield _decode_sse_lines(
+                    parsed_event = _decode_sse_lines(
                         lines,
                         max_json_depth=max_json_depth,
                         max_json_nodes=max_json_nodes,
                         max_string_bytes=max_string_bytes,
                     )
+                    if parsed_event is not None:
+                        yield parsed_event
                     lines = []
                     event_size = 0
                     continue
@@ -282,6 +296,7 @@ class _CompactionStreamItem:
     item_id: str
     item: dict[str, Any]
     encrypted_digest: bytes
+    compacting: bool = False
     item_done: bool = False
 
 
@@ -1291,11 +1306,17 @@ class _ResponsesStreamTranslator:
             state.item_done = True
         elif isinstance(state, _CompactionStreamItem):
             projected_item, digest = self._compaction_item(item)
-            if (
-                state.item_done
-                or digest != state.encrypted_digest
-                or not _json_type_exact_equal(projected_item, state.item)
-            ):
+            if state.item_done or projected_item["id"] != state.item_id:
+                raise _invalid_stream()
+            if digest != state.encrypted_digest:
+                if (
+                    not state.compacting
+                    or digest in self.encrypted_digests
+                    or digest in self.transient_reasoning_digests
+                ):
+                    raise _invalid_stream()
+                self.encrypted_digests.add(digest)
+            elif not _json_type_exact_equal(projected_item, state.item):
                 raise _invalid_stream()
             state.item_done = True
         elif isinstance(state, _TextStreamItem):
@@ -1361,8 +1382,6 @@ class _ResponsesStreamTranslator:
         ):
             raise _invalid_stream()
         if output:
-            if self.custom_tool_name is not None:
-                raise _invalid_stream()
             for index, item in enumerate(output):
                 if not _json_type_exact_equal(item, self.done_items[index]):
                     raise _invalid_stream()
@@ -1426,6 +1445,33 @@ class _ResponsesStreamTranslator:
         frames.append(b"data: [DONE]\n\n")
         return tuple(frames)
 
+    def _on_compacting(self, event: dict[str, Any]) -> tuple[bytes, ...]:
+        _exact_fields(event, {"type", "item_id", "output_index"}, {"sequence_number"})
+        state = self.items_by_index.get(self._validate_output_index(event))
+        if (
+            not isinstance(state, _CompactionStreamItem)
+            or state.item_done
+            or state.compacting
+            or event["item_id"] != state.item_id
+        ):
+            raise _invalid_stream()
+        state.compacting = True
+        return ()
+
+    def _on_metadata(self, event: dict[str, Any]) -> tuple[bytes, ...]:
+        _exact_fields(event, {"type", "response_id", "metadata"}, {"sequence_number"})
+        if (
+            not self.identity_from_upstream
+            or event["response_id"] != self.identity.response_id
+            or type(event["metadata"]) is not dict
+        ):
+            raise _invalid_stream()
+        # Provider metadata is bounded by the SSE parser and never projected publicly.
+        self.unknown_events += 1
+        if self.unknown_events > self.max_unknown_events:
+            raise _invalid_stream()
+        return ()
+
     def feed(self, parsed: ParsedSseEvent) -> tuple[bytes, ...]:
         if self.saw_done:
             raise _invalid_stream()
@@ -1447,6 +1493,8 @@ class _ResponsesStreamTranslator:
             # Strip only this observed transport field; all handler schemas remain closed.
             event = {key: value for key, value in event.items() if key != "safety_buffering"}
         handlers = {
+            "response.metadata": self._on_metadata,
+            "response.compaction.compacting": self._on_compacting,
             "response.output_item.added": self._on_output_added,
             "response.content_part.added": self._on_content_added,
             "response.output_text.delta": self._on_text_delta,
