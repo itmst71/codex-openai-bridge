@@ -15,6 +15,7 @@ from decimal import Decimal, DecimalException
 from typing import Any, Literal
 
 from codex_openai_bridge.continuation import ContinuationError, decode_continuation_id
+from codex_openai_bridge.route_receipts import wrap_route_token
 
 
 class ChatRequestError(ValueError):
@@ -126,7 +127,9 @@ def json_schema_name_for_upstream(name: str) -> str:
     return name.lower()
 
 
-def model_list_document(public_model: str | tuple[str, ...]) -> dict[str, object]:
+def model_list_document(
+    public_model: str | tuple[str, ...], *, require_codex: bool = True
+) -> dict[str, object]:
     """Build the stable, secret-free OpenAI model discovery document."""
     models: tuple[str, ...]
     if type(public_model) is str:
@@ -137,9 +140,9 @@ def model_list_document(public_model: str | tuple[str, ...]) -> dict[str, object
         raise ValueError("invalid public model")
     if not models or any(type(model) is not str or not model for model in models):
         raise ValueError("invalid public model")
-    ordered = ("codex", *sorted(model for model in models if model != "codex"))
-    if len(set(ordered)) != len(ordered) or "codex" not in models:
+    if len(set(models)) != len(models) or (require_codex and "codex" not in models):
         raise ValueError("invalid public model")
+    ordered = tuple(sorted(models, key=lambda model: (model != "codex", model)))
     return {
         "object": "list",
         "data": [
@@ -396,7 +399,8 @@ def create_reasoning_binding_id(
         raise ValueError("invalid reasoning binding") from None
     digest = hmac.new(key, canonical, hashlib.sha256).digest()
     prefix = "cobr_r3_" if public_model is not None else _REASONING_BINDING_PREFIX
-    return prefix + base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    token = prefix + base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return wrap_route_token(token, public_model=public_model, purpose="r")
 
 
 def reasoning_binding_is_valid(

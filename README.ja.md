@@ -237,6 +237,8 @@ service は、検証済みの environment variables を読み込みます。主�
 
 ### Server-owned model aliases
 
+以下はデフォルトの**静的モード**の説明です。
+
 必須の`codex`以外も有効にするにはexampleをcopyします。
 
 ```bash
@@ -261,7 +263,30 @@ tool、reasoning、compaction continuation全体で同じaliasを使用してく
 
 これらのoperator定義aliasはprojectのsupport claimではありません。Production処理へ割り当てる前に、使用するChat、Responses、streaming、structured output、tool、reasoning、compactionの各surfaceで実modelを個別にlive検証してください。
 
-生成されるuser unitには、意図的に`EnvironmentFile=`もsecretも含めません。secret以外のoverridesには、user-unit drop-inを使用してください。
+### 公式カタログとdefaultの自動選択
+
+モデル追加・撤去・既定変更へ自動追従する場合は、user-unit drop-inで明示的に有効化します。
+
+```ini
+[Service]
+Environment=CODEX_BRIDGE_MODEL_DISCOVERY=codex
+Environment=CODEX_BRIDGE_MODEL_REFRESH_SECONDS=300
+Environment=CODEX_BRIDGE_MODEL_MAX_AGE_SECONDS=1800
+```
+
+一度再起動した後は、clientが`model="default"`を指定し続けられます。公式CLIの`model/list`をcursor末尾まで取得し、非hiddenの中で一意な`isDefault: true`を採用します。CLIが返すflagを正本とし、bridge独自の世代順位付けやCLI設定fileの別解釈はしません。取得はaccountに結び付け、stdout/stderr・deadline・子process groupのcleanupを制限します。
+
+- 起動時と定期的に取得し、モデル名・一覧の編集や再起動なしで新しい独立requestへ反映します。refreshは5–3600秒、最大ageは5–86400秒で、refresh間隔以上が必要です。
+- 世代aliasは先頭`gpt-`を除き、`.`を`-`へ変え、`codex-`を付けます。例：`gpt-6.1-sol`→`codex-6-1-sol`。他のモデル名は全体をstemとして残します。
+- 不正identifier、alias衝突、モデル重複、既定なし／複数、未完paginationは更新全体を拒否します。モデルrecordは最大128件、paginationは最大8ページです。
+- 既存TOMLは起動時に読む固定aliasの入力設定です。自動生成一覧ではありません。対象modelが公開カタログに存在する間だけ有効で、別modelへ勝手に付け替えません。自動モードでは`default`を予約します。
+- 一つの不変snapshotで一覧公開と受付を揃え、requestはcredentials待機より前に実model・署名authorityを確定します。更新失敗で直前正常snapshotの寿命は延長しません。未取得／期限切れではreadiness・一覧・生成を503にし、静的設定へfallbackしません。cacheはmemory-onlyで、再起動時は新たな取得が必要です。
+- defaultのreasoning・compaction・tool継続は、既存の再送ID内に入る署名付き`cobr_t1_` receiptで開始時modelへ固定します。実model名・route署名鍵は公開せず、既存のID/state/assistant意味結合も検証します。model撤去・改ざん・route混在・alias跨ぎ・receipt剥離はcredentials/upstream呼出し前に拒否します。
+- 認証済み継続情報のない平文履歴だけでは元modelを証明できないため、新しい独立requestとして扱います。再起動を跨ぐ継続には同じcontinuation keyを保持してください。会話履歴をserverに保存する機能は追加しません。
+
+カタログへの掲載は全bridge機能との互換性保証ではありません。従来の厳格なrequest/SSE検証・各種上限は維持し、未知のprovider挙動の透過や別modelでの自動再送はしません。
+
+生成されるuser unitには、意図的に`EnvironmentFile=`もsecretも含めません。他のsecret以外のoverridesには、user-unit drop-inを使用してください。
 
 ```ini
 [Service]

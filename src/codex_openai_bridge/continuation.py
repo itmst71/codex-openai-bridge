@@ -9,6 +9,12 @@ import json
 import re
 from typing import cast
 
+from codex_openai_bridge.route_receipts import (
+    RouteReceiptError,
+    unwrap_route_token,
+    wrap_route_token,
+)
+
 _PREFIX = "cobr_c1_"
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
 _MODEL_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z", re.ASCII)
@@ -121,7 +127,10 @@ def encode_continuation_id(
     token = f"{_PREFIX}{_urlsafe_encode(payload)}.{_urlsafe_encode(tag)}"
     if len(token.encode("ascii")) > _MAX_TOKEN_BYTES:
         raise ContinuationError("invalid continuation")
-    return token
+    try:
+        return wrap_route_token(token, public_model=public_model, purpose="i")
+    except RouteReceiptError:
+        raise ContinuationError("invalid continuation") from None
 
 
 def decode_continuation_id(
@@ -136,6 +145,10 @@ def decode_continuation_id(
     """Verify one public continuation identifier and recover its upstream value."""
     if type(value) is not str or len(value.encode("utf-8", errors="strict")) > _MAX_TOKEN_BYTES:
         raise ContinuationError("invalid continuation")
+    try:
+        value = unwrap_route_token(value, public_model=public_model, purpose="i")
+    except RouteReceiptError:
+        raise ContinuationError("invalid continuation") from None
     if not value.startswith(_PREFIX):
         if allow_legacy and _IDENTIFIER.fullmatch(value) is not None:
             return value

@@ -45,6 +45,9 @@ _KNOWN_ENVIRONMENT = frozenset(
         "CODEX_BRIDGE_MAX_TOOLS",
         "CODEX_BRIDGE_MAX_UPSTREAM_BODY_BYTES",
         "CODEX_BRIDGE_MODEL_CONFIG_FILE",
+        "CODEX_BRIDGE_MODEL_DISCOVERY",
+        "CODEX_BRIDGE_MODEL_REFRESH_SECONDS",
+        "CODEX_BRIDGE_MODEL_MAX_AGE_SECONDS",
         "CODEX_BRIDGE_PORT",
         "CODEX_BRIDGE_PUBLIC_MODEL",
         "CODEX_BRIDGE_QUEUE_WAIT_SECONDS",
@@ -133,6 +136,9 @@ class Settings:
     response_header_timeout_seconds: float
     stream_idle_timeout_seconds: float
     total_request_deadline_seconds: float
+    model_discovery: str = "static"
+    model_refresh_seconds: float = 300.0
+    model_max_age_seconds: float = 1800.0
 
     @property
     def public_models(self) -> tuple[str, ...]:
@@ -142,7 +148,7 @@ class Settings:
     @property
     def model_map_active(self) -> bool:
         """Return whether operator model-map authority is active, even with one alias."""
-        return self.model_config_file is not None
+        return self.model_config_file is not None or self.model_discovery == "codex"
 
     def resolve_upstream_model(self, public_alias: str) -> str | None:
         """Resolve only a server-approved public alias."""
@@ -151,6 +157,8 @@ class Settings:
         return self.model_map.get(public_alias)
 
     def _validate_relationships(self) -> None:
+        if self.model_refresh_seconds > self.model_max_age_seconds:
+            raise ConfigError("model refresh interval must not exceed catalog maximum age")
         relationships = (
             (
                 "CODEX_BRIDGE_MAX_STRING_BYTES",
@@ -227,6 +235,12 @@ class Settings:
         else:
             model_map = MappingProxyType({"codex": _configured_model()})
 
+        model_discovery = os.environ.get("CODEX_BRIDGE_MODEL_DISCOVERY", "static")
+        if model_discovery not in ("static", "codex"):
+            raise ConfigError("CODEX_BRIDGE_MODEL_DISCOVERY must be static or codex")
+        if model_discovery == "codex" and "default" in model_map:
+            raise ConfigError("default is reserved for official model discovery")
+
         settings = cls(
             host=host,
             port=_bounded_int("CODEX_BRIDGE_PORT", 8646, minimum=1, maximum=65_535),
@@ -234,6 +248,13 @@ class Settings:
             upstream_model=model_map["codex"],
             model_config_file=model_config_file,
             model_map=model_map,
+            model_discovery=model_discovery,
+            model_refresh_seconds=_bounded_float(
+                "CODEX_BRIDGE_MODEL_REFRESH_SECONDS", 300.0, minimum=5.0, maximum=3600.0
+            ),
+            model_max_age_seconds=_bounded_float(
+                "CODEX_BRIDGE_MODEL_MAX_AGE_SECONDS", 1800.0, minimum=5.0, maximum=86400.0
+            ),
             codex_path=_configured_path(
                 "CODEX_BRIDGE_CODEX_PATH", Path.home() / ".local" / "bin" / "codex"
             ),

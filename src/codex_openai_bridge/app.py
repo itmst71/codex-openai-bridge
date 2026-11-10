@@ -19,6 +19,7 @@ from codex_openai_bridge.admission import (
     AdmissionShuttingDown,
 )
 from codex_openai_bridge.auth import Credential
+from codex_openai_bridge.codex_cli_models import discover_models
 from codex_openai_bridge.config import Settings
 from codex_openai_bridge.continuation import derive_route_binding_key
 from codex_openai_bridge.errors import openai_error_response
@@ -29,6 +30,12 @@ from codex_openai_bridge.json_boundary import (
     validate_json_request_headers,
 )
 from codex_openai_bridge.logging import emit_request_log, endpoint_class
+from codex_openai_bridge.model_catalog import (
+    CatalogLoader,
+    CatalogModel,
+    CatalogRegistry,
+    CatalogUnavailable,
+)
 from codex_openai_bridge.responses import (
     ResponsesRequest,
     ResponsesRequestError,
@@ -37,6 +44,13 @@ from codex_openai_bridge.responses import (
     responses_to_public,
 )
 from codex_openai_bridge.responses_stream import ResponsesSseTranslator
+from codex_openai_bridge.route_receipts import (
+    RouteReceipt,
+    RouteReceiptError,
+    activate_receipt,
+    receipt_scope,
+    select_receipt_model,
+)
 from codex_openai_bridge.security import (
     TokenConfigurationError,
     bearer_is_authorized,
@@ -77,6 +91,7 @@ _CREDENTIAL_PROVIDER_KEY = web.AppKey("credential_provider", CredentialProvider)
 _SETTINGS_KEY = web.AppKey("settings", Settings)
 _UPSTREAM_KEY = web.AppKey("upstream", object)
 _ADMISSION_KEY = web.AppKey("admission", AdmissionController)
+_CATALOG_KEY = web.AppKey("model_catalog", CatalogRegistry)
 _CANONICAL_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
 
@@ -98,6 +113,54 @@ def _request_continuation_key(
         public_model=public_model,
         upstream_model=upstream_model,
     )
+
+
+def _request_route(
+    request: web.Request, document: object, *, surface: str
+) -> tuple[tuple[str, ...], str, str]:
+    settings = request.app[_SETTINGS_KEY]
+    base_key = request.app[_CONTINUATION_KEY]
+    if settings.model_discovery == "codex":
+        snapshot = request.app[_CATALOG_KEY].current()
+        routes = snapshot.routes
+    else:
+        snapshot = None
+        routes = settings.model_map
+    if type(document) is not dict or type(document.get("model")) is not str:
+        raise RouteReceiptError("invalid continuation route")
+    alias = document["model"]
+    if alias not in routes:
+        raise RouteReceiptError("invalid continuation route")
+    model = routes[alias]
+    if snapshot is not None:
+        pinned = select_receipt_model(
+            document,
+            surface=surface,
+            public_model=alias,
+            models=snapshot.models,
+            binding_key=base_key,
+        )
+        if pinned is not None:
+            if alias != "default":
+                raise RouteReceiptError("invalid continuation route")
+            model = pinned
+        if alias == "default":
+            activate_receipt(RouteReceipt(base_key, alias, model))
+    key = (
+        derive_route_binding_key(base_key, public_model=alias, upstream_model=model)
+        if snapshot is not None
+        else _request_continuation_key(settings, base_key, document)
+    )
+    return tuple(routes), model, key
+
+
+@web.middleware
+async def _receipt_middleware(
+    request: web.Request,
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+) -> web.StreamResponse:
+    with receipt_scope(None):
+        return await handler(request)
 
 
 _READINESS_EXPIRY_SKEW_SECONDS = 60
@@ -379,6 +442,12 @@ async def _healthz(_request: web.Request) -> web.Response:
 
 
 async def _models(request: web.Request) -> web.Response:
+    if request.app[_SETTINGS_KEY].model_discovery == "codex":
+        try:
+            models = tuple(request.app[_CATALOG_KEY].current().routes)
+        except CatalogUnavailable:
+            return _catalog_error_response()
+        return web.json_response(model_list_document(models, require_codex=False))
     return web.json_response(model_list_document(request.app[_SETTINGS_KEY].public_models))
 
 
@@ -434,8 +503,22 @@ async def _readyz(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"status": "unavailable"}, status=503)
     if _credential_is_ready(credential, now=time.time()):
+        if request.app[_SETTINGS_KEY].model_discovery == "codex":
+            try:
+                request.app[_CATALOG_KEY].current()
+            except CatalogUnavailable:
+                return web.json_response({"status": "unavailable"}, status=503)
         return web.json_response({"status": "ready"})
     return web.json_response({"status": "unavailable"}, status=503)
+
+
+def _catalog_error_response() -> web.Response:
+    return openai_error_response(
+        status=503,
+        message="Model catalog unavailable",
+        error_type="server_error",
+        code="model_catalog_unavailable",
+    )
 
 
 def _invalid_request_response() -> web.Response:
@@ -791,11 +874,13 @@ async def _chat_completions(request: web.Request) -> web.Response:
         return _upstream_error_response(UpstreamError(UpstreamErrorKind.TIMEOUT))
     except JsonBoundaryError as error:
         return _json_boundary_response(error)
-    binding_key = _request_continuation_key(settings, request.app[_CONTINUATION_KEY], document)
     try:
+        public_models, upstream_model, binding_key = _request_route(
+            request, document, surface="chat"
+        )
         chat_request = parse_chat_completion_request(
             document,
-            public_model=settings.public_models,
+            public_model=public_models,
             max_messages=settings.max_messages,
             max_tools=settings.max_tools,
             max_json_depth=settings.max_json_depth,
@@ -804,11 +889,12 @@ async def _chat_completions(request: web.Request) -> web.Response:
             binding_key=binding_key,
             model_scoped=settings.model_map_active,
         )
-        upstream_model = settings.resolve_upstream_model(chat_request.model)
         if upstream_model is None:
             raise ChatRequestError("invalid request")
         payload = chat_request_to_responses(chat_request, upstream_model=upstream_model)
-    except ChatRequestError:
+    except CatalogUnavailable:
+        return _catalog_error_response()
+    except (ChatRequestError, RouteReceiptError):
         return _invalid_request_response()
 
     try:
@@ -881,11 +967,13 @@ async def _responses(request: web.Request) -> web.Response:
         return _upstream_error_response(UpstreamError(UpstreamErrorKind.TIMEOUT))
     except JsonBoundaryError as error:
         return _json_boundary_response(error)
-    binding_key = _request_continuation_key(settings, request.app[_CONTINUATION_KEY], document)
     try:
+        public_models, upstream_model, binding_key = _request_route(
+            request, document, surface="responses"
+        )
         responses_request = parse_responses_request(
             document,
-            public_model=settings.public_models,
+            public_model=public_models,
             max_items=settings.max_messages,
             max_tools=settings.max_tools,
             max_json_depth=settings.max_json_depth,
@@ -894,14 +982,15 @@ async def _responses(request: web.Request) -> web.Response:
             binding_key=binding_key,
             model_scoped=settings.model_map_active,
         )
-        upstream_model = settings.resolve_upstream_model(responses_request.model)
         if upstream_model is None:
             raise ResponsesRequestError("invalid request")
         payload = responses_request_to_upstream(
             responses_request,
             upstream_model=upstream_model,
         )
-    except ResponsesRequestError:
+    except CatalogUnavailable:
+        return _catalog_error_response()
+    except (ResponsesRequestError, RouteReceiptError):
         return _invalid_request_response()
     if time.monotonic() > deadline:
         return _upstream_error_response(UpstreamError(UpstreamErrorKind.TIMEOUT))
@@ -968,10 +1057,16 @@ def create_app(
     credential_provider: CredentialProvider,
     *,
     upstream: ResponsesUpstream | StreamingResponsesUpstream | None = None,
+    catalog_loader: CatalogLoader | None = None,
 ) -> web.Application:
     """Create the loopback bridge application with startup-loaded client auth."""
     app = web.Application(
-        middlewares=[_request_id_middleware, _client_auth_middleware, _admission_middleware],
+        middlewares=[
+            _request_id_middleware,
+            _client_auth_middleware,
+            _receipt_middleware,
+            _admission_middleware,
+        ],
         client_max_size=settings.max_request_body_bytes,
     )
     app[_TOKEN_KEY] = load_bridge_token(settings.client_token_file)
@@ -980,6 +1075,30 @@ def create_app(
         raise TokenConfigurationError("bridge token is unavailable")
     app[_CREDENTIAL_PROVIDER_KEY] = credential_provider
     app[_SETTINGS_KEY] = settings
+    if settings.model_discovery == "codex":
+
+        async def official_catalog() -> tuple[CatalogModel, ...]:
+            credential = await credential_provider.get_credentials()
+            if credential.account_id is None:
+                raise CatalogUnavailable("model catalog is unavailable")
+            return await discover_models(settings, account_id=credential.account_id)
+
+        registry = CatalogRegistry(
+            catalog_loader if catalog_loader is not None else official_catalog,
+            overrides=settings.model_map,
+            refresh_seconds=settings.model_refresh_seconds,
+            max_age_seconds=settings.model_max_age_seconds,
+        )
+        app[_CATALOG_KEY] = registry
+
+        async def catalog_lifecycle(_application: web.Application) -> AsyncIterator[None]:
+            try:
+                await registry.start()
+                yield
+            finally:
+                await registry.aclose()
+
+        app.cleanup_ctx.append(catalog_lifecycle)
     app[_ADMISSION_KEY] = AdmissionController(
         max_in_flight=settings.max_in_flight,
         queue_wait_seconds=settings.queue_wait_seconds,

@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/downloads/)
 
-A bounded, loopback-only OpenAI-compatible HTTP bridge for the Codex Responses backend. It lets consumers such as the OpenAI Python SDK, Honcho, LangChain, and the OpenAI Agents SDK select from server-approved aliases while keeping the upstream URL, OAuth authorization, account ID, and real model under server control. The required default alias is `codex`.
+A bounded, loopback-only OpenAI-compatible HTTP bridge for the Codex Responses backend. It lets consumers such as the OpenAI Python SDK, Honcho, LangChain, and the OpenAI Agents SDK select from server-approved aliases while keeping the upstream URL, OAuth authorization, account ID, and real model under server control. Static configuration requires the compatibility alias `codex`; opt-in official discovery adds the floating selector `default`.
 
 This project is an independent translation service. It does **not** run an agent loop, system
 prompt, memory, or tools.
@@ -110,7 +110,7 @@ The bridge exposes only server-approved aliases. It reconstructs the real upstre
 | --- | --- |
 | `GET /healthz` | Supported; process liveness only |
 | `GET /readyz` | Supported; bounded credential readiness |
-| `GET /v1/models` | Supported; lists only configured public aliases, with `codex` first |
+| `GET /v1/models` | Supported; lists server-approved static or discovered aliases, with `codex` first when available |
 | `POST /v1/chat/completions` | Supported, including SSE streaming |
 | `POST /v1/responses` | Supported for the live-proven stateless subset, including named Responses SSE events |
 | Function tools and tool history | Supported with strict identity and call/output pairing checks |
@@ -124,7 +124,7 @@ The bridge exposes only server-approved aliases. It reconstructs the real upstre
 | `POST /v1/embeddings` | **Embeddings are not supported**; returns a sanitized unsupported error |
 | `previous_response_id`, conversations, and stored response retrieval | Unsupported; the bridge remains stateless and forces `store:false` |
 | Local shell, web search, computer use, MCP, hosted tools, and image input | Unsupported and rejected; no capability is emulated |
-| Client-selected public model alias | Supported only for aliases configured by the server operator |
+| Client-selected public model alias | Supported only for operator-configured or officially discovered public aliases |
 | Client-selected real upstream URL/model/account/auth policy | Unsupported and rejected |
 | Automatic retry of 429, 5xx, timeout, or interrupted generation | Unsupported; only one exact credential refresh/replay after upstream 401 |
 
@@ -287,6 +287,8 @@ Additional `CODEX_BRIDGE_MAX_*` and timeout variables are strictly bounded in `c
 
 ### Server-owned model aliases
 
+The following configuration is the default **static** mode.
+
 Copy the example to enable more than the required `codex` alias:
 
 ```bash
@@ -311,7 +313,54 @@ Use the same alias for the complete tool, reasoning, or compaction continuation.
 
 These operator-defined aliases are not project support claims. Before assigning an alias to production work, independently live-verify that real model for every Chat, Responses, streaming, structured-output, tool, reasoning, and compaction surface that will use it.
 
-The generated user unit intentionally contains no `EnvironmentFile=` and no secret. For non-secret overrides, use a user-unit drop-in:
+### Automatic official catalog and default selection
+
+To track additions, withdrawals and the official default without editing model names, opt in with
+a non-secret user-unit drop-in:
+
+```ini
+[Service]
+Environment=CODEX_BRIDGE_MODEL_DISCOVERY=codex
+Environment=CODEX_BRIDGE_MODEL_REFRESH_SECONDS=300
+Environment=CODEX_BRIDGE_MODEL_MAX_AGE_SECONDS=1800
+```
+
+After restarting once, clients may consistently request `model="default"`. The bridge obtains the
+account-scoped catalog through the official CLI's `model/list`, exhausts its cursor, excludes hidden
+models and requires exactly one visible `isDefault: true`. The rule follows exactly the flag returned
+by the CLI; the bridge does not independently rank versions or interpret CLI configuration files.
+New independent requests follow later default
+changes without a bridge restart. Refresh intervals are 5–3600 seconds; maximum age is 5–86400
+seconds and must not be shorter than the refresh interval.
+
+Versioned aliases are deterministic: remove a leading `gpt-`, replace dots with hyphens and prepend
+`codex-` (`gpt-6.1-sol` becomes `codex-6-1-sol`). Other model names retain their full stem after
+`codex-`. Invalid identifiers, alias collisions, duplicate models, ambiguous defaults and incomplete
+pagination reject the entire update. Discovery is bounded to 128 model records and eight pages.
+The existing startup-loaded TOML remains an optional set of pinned compatibility aliases, not an
+auto-generated inventory. A pinned alias is advertised only while its target is visible; it is never
+repointed to another model. `default` is reserved in discovery mode.
+
+One immutable catalog generation governs discovery and request acceptance. Each request captures
+its effective model and signing authority before awaiting credentials or upstream I/O. Failed refreshes
+do not extend the last-good generation's lifetime. With no successful catalog, or after it expires,
+`/readyz`, `/v1/models` and generation fail with 503 rather than falling back to static routes.
+The catalog cache is memory-only; a restart requires a successful discovery again.
+
+Default-selected reasoning, compaction and tool continuations carry an authenticated `cobr_t1_`
+route receipt inside their existing replayed IDs. The receipt reveals neither the real model name
+nor the model-bound signing key; the original ID/state/assistant-semantic signatures remain checked.
+After a default change, valid continuations stay on their original model if it remains visible.
+Withdrawal, tampering, mixed routes, cross-alias replay and receipt stripping fail closed before
+credential/upstream access. A request containing only plain text and no authenticated continuation
+artifact cannot prove a previous route and is treated as independent. Preserve the server continuation
+key across restarts to retain signed continuity. No conversation history is stored by the bridge.
+
+Catalog discovery does not certify a new model's compatibility with every bridge surface. Existing
+strict request, SSE, resource and feature validation remains in force; unsupported provider behavior
+is not passed through or retried on another model.
+
+The generated user unit intentionally contains no `EnvironmentFile=` and no secret. For other non-secret overrides, use a user-unit drop-in:
 
 ```ini
 [Service]
