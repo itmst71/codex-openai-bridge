@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from openai.types.responses import ResponseReasoningItem
 
 from codex_openai_bridge.config import Settings
 from codex_openai_bridge.models import ParsedSseEvent
@@ -207,12 +208,13 @@ async def _project_summary(events: list[dict[str, Any]], surface: str) -> bytes:
     return json.dumps(result).encode()
 
 
-def _validator(**overrides: Any) -> ResponsesStreamValidator:
+def _validator(
+    *, max_unknown_events: int = 256, max_string_bytes: int = 4096
+) -> ResponsesStreamValidator:
     return ResponsesStreamValidator(
-        **(
-            {"public_model": "codex", "max_unknown_events": 256, "max_string_bytes": 4096}
-            | overrides
-        )
+        public_model="codex",
+        max_unknown_events=max_unknown_events,
+        max_string_bytes=max_string_bytes,
     )
 
 
@@ -448,7 +450,8 @@ async def test_summary_obfuscation_is_bounded_private_delta_metadata() -> None:
     events[3]["obfuscation"] = "PRIVATE SYNTHETIC OBFUSCATION"
     frames = await _responses_stream(events, document=_document())
     assert b"PRIVATE SYNTHETIC OBFUSCATION" not in b"".join(frames)
-    for invalid in (None, True, 1, [], "x" * 4097, "\ud800"):
+    invalid_obfuscations: tuple[object, ...] = (None, True, 1, [], "x" * 4097, "\ud800")
+    for invalid in invalid_obfuscations:
         validator = _validator()
         _feed(validator, events[:3])
         bad = {**events[3], "obfuscation": invalid}
@@ -535,8 +538,9 @@ async def test_summary_events_use_model_bound_item_ids_and_replay_preserves_summ
 async def test_summary_does_not_bypass_existing_parser_budgets(limit: str, value: int) -> None:
     events = _summary_events(summaries=("s" * 512,))
     await _buffered(events)
+    overrides: dict[str, Any] = {limit: value}
     with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
-        await _buffered(events, replace(Settings.from_env(), **{limit: value}))
+        await _buffered(events, replace(Settings.from_env(), **overrides))
 
 
 @pytest.mark.asyncio
@@ -575,10 +579,12 @@ async def test_sdk_sequential_tool_roundtrip_with_requested_summary(
                 result = await response_stream.get_final_response()
             assert all(event_type in seen for event_type in SUMMARY_TYPES)
         else:
-            result = await running.client.responses.create(**kwargs)
+            result = await running.client.responses.create(stream=False, **kwargs)
         assert result.output_text == "hello"
-        assert result.output[0].type == "reasoning"
-        assert result.output[0].summary[0].text == SUMMARY
+        reasoning = result.output[0]
+        assert isinstance(reasoning, ResponseReasoningItem)
+        assert reasoning.type == "reasoning"
+        assert reasoning.summary[0].text == SUMMARY
         assert running.upstream.calls[1]["reasoning"] == {"effort": "high", "summary": "detailed"}
         assert running.upstream.calls[1]["input"][-1]["type"] == "function_call_output"
         assert len(running.upstream.calls) == 2

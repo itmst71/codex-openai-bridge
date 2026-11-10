@@ -90,7 +90,12 @@ def _public(response: object, surface: str, **limits: int) -> dict[str, Any]:
     bounds = LIMITS | limits
     if surface.startswith("chat"):
         return responses_to_chat_completion(
-            response, public_model="codex", binding_key="synthetic-binding", **bounds
+            response,
+            public_model="codex",
+            binding_key="synthetic-binding",
+            max_json_depth=bounds["max_json_depth"],
+            max_json_nodes=bounds["max_json_nodes"],
+            max_string_bytes=bounds["max_string_bytes"],
         )
     return responses_to_public(
         response,
@@ -98,7 +103,9 @@ def _public(response: object, surface: str, **limits: int) -> dict[str, Any]:
         public_model="codex",
         max_items=16,
         max_tools=8,
-        **bounds,
+        max_json_depth=bounds["max_json_depth"],
+        max_json_nodes=bounds["max_json_nodes"],
+        max_string_bytes=bounds["max_string_bytes"],
     )
 
 
@@ -238,7 +245,8 @@ def _invalid_attributions() -> list[object]:
                     "string": "1",
                 }[change]
             values.append(value)
-    for bad in (None, {}, True, [None], [{"input_tokens": 1}]):
+    invalid_contents: tuple[object, ...] = (None, {}, True, [None], [{"input_tokens": 1}])
+    for bad in invalid_contents:
         value = _attribution()
         value["items"][PRIVATE_ITEM]["content"] = bad
         values.append(value)
@@ -455,42 +463,54 @@ async def test_sdk_http_metadata_and_continuation_stay_private(
         buffered_nonstream=True,
     ) as running:
         stream = surface.endswith("stream")
+        dumped: object
+        text: str | None
         if surface.startswith("chat"):
             messages: list[Any] = [{"role": "user", "content": "hello"}]
-            result = await running.client.chat.completions.create(
-                model="codex",
-                messages=messages,
-                stream=stream,
-                **({"stream_options": {"include_usage": True}} if stream else {}),
-            )
             if stream:
-                frames = [chunk async for chunk in result]
-                dumped = [chunk.model_dump() for chunk in frames]
-                text = "".join(
-                    chunk.choices[0].delta.content or "" for chunk in frames if chunk.choices
+                chat_stream = await running.client.chat.completions.create(
+                    model="codex",
+                    messages=messages,
+                    stream=True,
+                    stream_options={"include_usage": True},
                 )
-                assert frames[-1].usage.total_tokens == 3
+                chat_frames = [chunk async for chunk in chat_stream]
+                dumped = [chunk.model_dump() for chunk in chat_frames]
+                text = "".join(
+                    chunk.choices[0].delta.content or "" for chunk in chat_frames if chunk.choices
+                )
+                assert chat_frames[-1].usage is not None
+                assert chat_frames[-1].usage.total_tokens == 3
             else:
-                dumped = result.model_dump()
-                text = result.choices[0].message.content
-                assert result.usage.total_tokens == 3
+                completion = await running.client.chat.completions.create(
+                    model="codex", messages=messages, stream=False
+                )
+                dumped = completion.model_dump()
+                text = completion.choices[0].message.content
+                assert completion.usage is not None
+                assert completion.usage.total_tokens == 3
             messages.extend(
                 [{"role": "assistant", "content": text}, {"role": "user", "content": "again"}]
             )
             await running.client.chat.completions.create(model="codex", messages=messages)
         else:
-            result = await running.client.responses.create(
-                model="codex", input="hello", stream=stream
-            )
             if stream:
-                frames = [event async for event in result]
-                dumped = [event.model_dump() for event in frames]
-                response = frames[-1].response
+                response_stream = await running.client.responses.create(
+                    model="codex", input="hello", stream=True
+                )
+                response_events = [event async for event in response_stream]
+                dumped = [event.model_dump() for event in response_events]
+                terminal = response_events[-1]
+                assert terminal.type == "response.completed"
+                response = terminal.response
             else:
-                dumped = result.model_dump()
-                response = result
+                response = await running.client.responses.create(
+                    model="codex", input="hello", stream=False
+                )
+                dumped = response.model_dump()
+            assert response.usage is not None
             assert response.usage.total_tokens == 3
-            history = [
+            history: list[Any] = [
                 {"role": "user", "content": "hello"},
                 *[item.model_dump(exclude_none=True) for item in response.output],
                 {"role": "user", "content": "again"},
@@ -556,7 +576,13 @@ async def test_buffered_metadata_is_bounded_before_it_is_stripped(limit: str) ->
     bounds = {key: max(_tree_bounds(event)[key] for event in events) for key in LIMITS}
     bounds[limit] -= 1
     upstream = _StreamingOnlyUpstream(b"".join(_event(event) for event in events))
-    buffered = BufferedResponsesUpstream(upstream, replace(Settings.from_env(), **bounds))
+    settings = replace(
+        Settings.from_env(),
+        max_json_depth=bounds["max_json_depth"],
+        max_json_nodes=bounds["max_json_nodes"],
+        max_string_bytes=bounds["max_string_bytes"],
+    )
+    buffered = BufferedResponsesUpstream(upstream, settings)
     with pytest.raises(UpstreamResponseError, match=r"^invalid upstream response$"):
         await buffered.create_response(_CredentialManager().credential, {})
     assert upstream.stream.close_calls == 1
