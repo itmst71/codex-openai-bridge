@@ -43,6 +43,7 @@ def test_catalog_aliases_default_overrides_and_immutability() -> None:
         "codex": "gpt-5.6-terra",
         "codex-5-6-terra": "gpt-5.6-terra",
         "codex-6-1-sol": "gpt-6.1-sol",
+        "standard": "gpt-6.1-sol",
     }
     assert snapshot.models == frozenset({"gpt-6.1-sol", "gpt-5.6-terra"})
     assert isinstance(snapshot.routes, MappingProxyType)
@@ -97,7 +98,11 @@ def test_hidden_and_withdrawn_models_are_not_advertised_or_remapped() -> None:
         overrides={"codex": "gpt-removed", "private": "gpt-secret"},
         refreshed_at=10.0,
     )
-    assert dict(snapshot.routes) == {"default": "gpt-6.1-sol", "codex-6-1-sol": "gpt-6.1-sol"}
+    assert dict(snapshot.routes) == {
+        "default": "gpt-6.1-sol",
+        "codex-6-1-sol": "gpt-6.1-sol",
+        "standard": "gpt-6.1-sol",
+    }
 
 
 @pytest.mark.asyncio

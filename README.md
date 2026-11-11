@@ -328,10 +328,31 @@ Environment=CODEX_BRIDGE_MODEL_MAX_AGE_SECONDS=1800
 After restarting once, clients may consistently request `model="default"`. The bridge obtains the
 account-scoped catalog through the official CLI's `model/list`, exhausts its cursor, excludes hidden
 models and requires exactly one visible `isDefault: true`. The rule follows exactly the flag returned
-by the CLI; the bridge does not independently rank versions or interpret CLI configuration files.
+by the CLI; `default` does not independently rank versions or interpret CLI configuration files.
 New independent requests follow later default
 changes without a bridge restart. Refresh intervals are 5–3600 seconds; maximum age is 5–86400
 seconds and must not be shorter than the refresh interval.
+
+The same opt-in also exposes family-policy selectors when their family is available:
+
+| Selector | Rule for new independent requests |
+|---|---|
+| `default` | Exactly the official visible `isDefault` model |
+| `standard` | Latest visible canonical Sol-family generation |
+| `advanced` | Latest visible canonical Astra-family generation |
+| `fast` | Latest visible canonical Luna-family generation |
+
+Family selection recognizes only `gpt-<numeric version>-sol`, `-astra` or `-luna`, with
+decimal components and no leading zeroes except a component equal to zero. Versions are compared
+as integer tuples, not strings (`6.10` is newer than `6.9`); trailing zero components are equivalent.
+If multiple model identifiers share the latest numeric version, reject the entire catalog update.
+Hidden models, preview/other suffixes and unrecognized names do not participate in family selection,
+though valid visible names may still have versioned aliases. A missing family omits its selector;
+requests for it fail with 400 instead of using another family. Withdrawal may select an older remaining
+generation for a fresh request, but never moves a signed continuation off its original model.
+These are explicit family policies, not measured speed, price or quality guarantees. `standard`
+can differ from `default` when the official default changes family or favors another generation.
+Static mode remains unchanged and does not synthesize these selectors.
 
 Versioned aliases are deterministic: remove a leading `gpt-`, replace dots with hyphens and prepend
 `codex-` (`gpt-6.1-sol` becomes `codex-6-1-sol`). Other model names retain their full stem after
@@ -339,7 +360,8 @@ Versioned aliases are deterministic: remove a leading `gpt-`, replace dots with 
 pagination reject the entire update. Discovery is bounded to 128 model records and eight pages.
 The existing startup-loaded TOML remains an optional set of pinned compatibility aliases, not an
 auto-generated inventory. A pinned alias is advertised only while its target is visible; it is never
-repointed to another model. `default` is reserved in discovery mode.
+repointed to another model. `default`, `standard`, `advanced` and `fast` are reserved in discovery
+mode; a TOML override for any of them rejects startup rather than silently changing its meaning.
 
 One immutable catalog generation governs discovery and request acceptance. Each request captures
 its effective model and signing authority before awaiting credentials or upstream I/O. Failed refreshes
@@ -347,10 +369,10 @@ do not extend the last-good generation's lifetime. With no successful catalog, o
 `/readyz`, `/v1/models` and generation fail with 503 rather than falling back to static routes.
 The catalog cache is memory-only; a restart requires a successful discovery again.
 
-Default-selected reasoning, compaction and tool continuations carry an authenticated `cobr_t1_`
+All four selectors' reasoning, compaction and tool continuations carry an authenticated `cobr_t1_`
 route receipt inside their existing replayed IDs. The receipt reveals neither the real model name
 nor the model-bound signing key; the original ID/state/assistant-semantic signatures remain checked.
-After a default change, valid continuations stay on their original model if it remains visible.
+After a selector changes target, valid continuations stay on their original model if it remains visible.
 Withdrawal, tampering, mixed routes, cross-alias replay and receipt stripping fail closed before
 credential/upstream access. A request containing only plain text and no authenticated continuation
 artifact cannot prove a previous route and is treated as independent. Preserve the server continuation

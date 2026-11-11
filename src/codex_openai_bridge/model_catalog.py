@@ -10,10 +10,11 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from codex_openai_bridge.config import _MODEL_ID
+from codex_openai_bridge.config import _MODEL_ID, FLOATING_MODEL_ALIASES, FLOATING_MODEL_FAMILIES
 
 MAX_CATALOG_MODELS = 128
 _ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z", re.ASCII)
+_FAMILY_MODEL = re.compile(r"gpt-((?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))*)-([a-z]+)\Z", re.ASCII)
 
 
 class CatalogUnavailable(RuntimeError):
@@ -84,13 +85,28 @@ def build_catalog(
     if len(defaults) != 1:
         raise _unavailable()
     available = frozenset(visible.values())
+    for selector, family in FLOATING_MODEL_FAMILIES.items():
+        candidates: list[tuple[tuple[int, ...], str]] = []
+        for model in available:
+            match = _FAMILY_MODEL.fullmatch(model)
+            if match is not None and match[2] == family:
+                version = tuple(int(part) for part in match[1].split("."))
+                while len(version) > 1 and version[-1] == 0:
+                    version = version[:-1]
+                candidates.append((version, model))
+        if candidates:
+            latest = max(version for version, _model in candidates)
+            selected = [model for version, model in candidates if version == latest]
+            if len(selected) != 1:
+                raise _unavailable()
+            visible[selector] = selected[0]
     for alias, model in overrides.items():
         if (
             type(alias) is not str
             or type(model) is not str
             or _ALIAS.fullmatch(alias) is None
             or _MODEL_ID.fullmatch(model) is None
-            or alias == "default"
+            or alias in FLOATING_MODEL_ALIASES
             or (alias in visible and visible[alias] != model)
         ):
             raise _unavailable()

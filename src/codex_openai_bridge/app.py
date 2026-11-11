@@ -20,7 +20,7 @@ from codex_openai_bridge.admission import (
 )
 from codex_openai_bridge.auth import Credential
 from codex_openai_bridge.codex_cli_models import discover_models
-from codex_openai_bridge.config import Settings
+from codex_openai_bridge.config import FLOATING_MODEL_ALIASES, Settings
 from codex_openai_bridge.continuation import derive_route_binding_key
 from codex_openai_bridge.errors import openai_error_response
 from codex_openai_bridge.json_boundary import (
@@ -141,10 +141,10 @@ def _request_route(
             binding_key=base_key,
         )
         if pinned is not None:
-            if alias != "default":
+            if alias not in FLOATING_MODEL_ALIASES:
                 raise RouteReceiptError("invalid continuation route")
             model = pinned
-        if alias == "default":
+        if alias in FLOATING_MODEL_ALIASES:
             activate_receipt(RouteReceipt(base_key, alias, model))
     key = (
         derive_route_binding_key(base_key, public_model=alias, upstream_model=model)

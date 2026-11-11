@@ -23,6 +23,8 @@ _MIB = 1024 * 1024
 _DECIMAL_INTEGER = re.compile(r"(?:0|[1-9][0-9]*)")
 _DECIMAL_NUMBER = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+FLOATING_MODEL_FAMILIES = MappingProxyType({"standard": "sol", "advanced": "astra", "fast": "luna"})
+FLOATING_MODEL_ALIASES = frozenset({"default", *FLOATING_MODEL_FAMILIES})
 _KNOWN_ENVIRONMENT = frozenset(
     {
         "CODEX_BRIDGE_CLIENT_TOKEN_FILE",
@@ -238,8 +240,9 @@ class Settings:
         model_discovery = os.environ.get("CODEX_BRIDGE_MODEL_DISCOVERY", "static")
         if model_discovery not in ("static", "codex"):
             raise ConfigError("CODEX_BRIDGE_MODEL_DISCOVERY must be static or codex")
-        if model_discovery == "codex" and "default" in model_map:
-            raise ConfigError("default is reserved for official model discovery")
+        reserved = FLOATING_MODEL_ALIASES.intersection(model_map)
+        if model_discovery == "codex" and reserved:
+            raise ConfigError(f"{min(reserved)} is reserved for official model discovery")
 
         settings = cls(
             host=host,
