@@ -954,8 +954,14 @@ def test_installer_binds_cleanup_to_open_parent_descriptor(
 
 
 def test_deployment_readmes_use_generated_unit_for_arbitrary_checkout() -> None:
-    english = README_PATH.read_text(encoding="utf-8")
-    japanese = README_JA_PATH.read_text(encoding="utf-8")
+    english = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (README_PATH, ROOT / "docs/setup.md", ROOT / "docs/operations.md")
+    )
+    japanese = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (README_JA_PATH, ROOT / "docs/setup.ja.md", ROOT / "docs/operations.ja.md")
+    )
     for required in (
         "git clone https://github.com/itmst71/codex-openai-bridge.git",
         "uv run python scripts/install_user_service.py",
@@ -997,18 +1003,18 @@ def test_contribution_gates_verify_generated_unit_not_removed_sample() -> None:
 
 
 def test_rollback_supports_revisions_before_the_installer_exists() -> None:
-    english = README_PATH.read_text(encoding="utf-8")
-    japanese = README_JA_PATH.read_text(encoding="utf-8")
+    english = (ROOT / "docs/operations.md").read_text(encoding="utf-8")
+    japanese = (ROOT / "docs/operations.ja.md").read_text(encoding="utf-8")
     for required in (
         "Before upgrading, preserve the currently installed verified unit",
-        "rollback-codex-openai-bridge.service",
+        '"$backup_dir/service"',
         "If the target revision predates `install_user_service.py`",
         "restore the preserved unit",
     ):
         assert required in english
     for required in (
         "upgrade前に現在install済みの検証済みunitをcheckout外へ保存",
-        "rollback-codex-openai-bridge.service",
+        '"$backup_dir/service"',
         "対象revisionが`install_user_service.py`より古い場合",
         "保存済みunitを復元",
     ):

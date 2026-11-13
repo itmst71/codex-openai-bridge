@@ -17,12 +17,35 @@ CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
 MODEL_CONFIG_EXAMPLE = ROOT / "deploy" / "models.toml.example"
 
 
+def published_text(japanese: bool = False) -> str:
+    suffix = ".ja.md" if japanese else ".md"
+    readme = README_JA if japanese else README
+    names = (
+        "setup",
+        "models",
+        "api",
+        "service-terms",
+        "operations",
+        "integrations",
+        "integrations/openai-python",
+        "integrations/honcho",
+        "integrations/langchain",
+        "integrations/agents",
+        "integrations/autogen",
+        "integrations/aider",
+        "integrations/cline",
+        "integrations/continue",
+    )
+    paths = [readme, *(ROOT / "docs" / f"{name}{suffix}" for name in names)]
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
 def test_publication_policy_is_explicit_and_bilingual() -> None:
-    english = README.read_text(encoding="utf-8")
-    japanese = README_JA.read_text(encoding="utf-8")
+    english = published_text()
+    japanese = published_text(japanese=True)
 
     for required in (
-        "## Intended use and service terms",
+        "# Intended use and service terms",
         "personal, single-user, local experimentation",
         "Do not share the bridge client token",
         "Do not pool ChatGPT/Codex accounts",
@@ -38,7 +61,7 @@ def test_publication_policy_is_explicit_and_bilingual() -> None:
         assert required in english
 
     for required in (
-        "## 想定用途とサービス利用条件",
+        "# 想定用途とサービス利用条件",
         "個人・単一ユーザー・ローカルでの実験用途",
         "ブリッジ client token を共有しないでください",
         "ChatGPT/Codex account をpoolしないでください",
@@ -55,8 +78,8 @@ def test_publication_policy_is_explicit_and_bilingual() -> None:
 
 
 def test_official_codex_cli_authentication_prerequisites_are_bilingual() -> None:
-    english = README.read_text(encoding="utf-8")
-    japanese = README_JA.read_text(encoding="utf-8")
+    english = published_text()
+    japanese = published_text(japanese=True)
     security = SECURITY.read_text(encoding="utf-8")
 
     assert english.count("## Prerequisites") == 1
@@ -118,8 +141,8 @@ def test_official_codex_cli_authentication_prerequisites_are_bilingual() -> None
 
 
 def test_model_alias_configuration_and_continuation_policy_are_bilingual() -> None:
-    english = README.read_text(encoding="utf-8")
-    japanese = README_JA.read_text(encoding="utf-8")
+    english = published_text()
+    japanese = published_text(japanese=True)
     security = SECURITY.read_text(encoding="utf-8")
     example = MODEL_CONFIG_EXAMPLE.read_text(encoding="utf-8")
 
@@ -164,8 +187,8 @@ def test_model_alias_configuration_and_continuation_policy_are_bilingual() -> No
 
 
 def test_upgrade_and_rollback_define_reasoning_signer_migration_boundary() -> None:
-    english = README.read_text(encoding="utf-8")
-    japanese = README_JA.read_text(encoding="utf-8")
+    english = published_text()
+    japanese = published_text(japanese=True)
 
     for required in (
         "Before upgrading, finish every active tool or reasoning chain",
@@ -192,8 +215,8 @@ def test_upgrade_and_rollback_define_reasoning_signer_migration_boundary() -> No
 
 
 def test_consumer_status_taxonomy_distinguishes_evidence_levels() -> None:
-    english = README.read_text(encoding="utf-8")
-    japanese = README_JA.read_text(encoding="utf-8")
+    english = published_text()
+    japanese = published_text(japanese=True)
 
     for required in (
         "**Contract verified**",
@@ -317,8 +340,11 @@ def test_security_policy_matches_personal_loopback_publication_scope() -> None:
 
 
 def test_bilingual_langchain_python_examples_are_syntactically_valid() -> None:
-    for path in (README, README_JA):
-        section = path.read_text(encoding="utf-8").split("### LangChain", 1)[1]
+    for path in (
+        ROOT / "docs/integrations/langchain.md",
+        ROOT / "docs/integrations/langchain.ja.md",
+    ):
+        section = path.read_text(encoding="utf-8")
         code = section.split("```python\n", 1)[1].split("\n```", 1)[0]
         tree = ast.parse(code, filename=str(path))
         try_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Try)]
@@ -330,7 +356,7 @@ def test_bilingual_langchain_python_examples_are_syntactically_valid() -> None:
 
 def test_mit_license_notice_does_not_claim_service_rights() -> None:
     assert "MIT License" in LICENSE.read_text(encoding="utf-8")
-    english = README.read_text(encoding="utf-8")
+    english = published_text()
     assert "does not grant rights to access or redistribute OpenAI services" in english
 
 
@@ -339,8 +365,8 @@ def test_contribution_acceptance_policy_and_forms_are_explicit() -> None:
     japanese = CONTRIBUTING_JA.read_text(encoding="utf-8")
     normalized_english = " ".join(english.split())
     normalized_japanese = " ".join(japanese.split())
-    readme = README.read_text(encoding="utf-8")
-    readme_ja = README_JA.read_text(encoding="utf-8")
+    readme = published_text()
+    readme_ja = published_text(japanese=True)
 
     assert "[日本語](CONTRIBUTING.ja.md)" in english
     assert "[English (canonical)](CONTRIBUTING.md)" in japanese
