@@ -22,6 +22,10 @@ Status meanings:
 Qualifiers such as `configuration required`, `adapter required`, `scoped`, `constrained role`, and
 `component only` narrow those evidence levels. A fixture or serializer compatibility alone is not an operational support claim, and no row implies support for an unlisted product surface.
 
+The additional qualifier `user-reported` attributes practical use to the operator's report, not an
+independently repeated maintainer run. For Unhush it covers normal Custom Formatting use only;
+it does not claim the failure-recovery or other operational boundaries described above.
+
 ```mermaid
 flowchart LR
     contract["Contract verified<br/>real package + deterministic fixture"]
@@ -35,6 +39,7 @@ flowchart LR
 | Consumer / tool | Status | Known-good version | Verified scope | Not verified / required conditions |
 | --- | --- | --- | --- | --- |
 | OpenAI Python SDK | **Live verified** | 1.109.1 and 3.1.0 | Live Chat/Responses non-stream and stream plus offline structured output, function/custom-tool, usage, and compaction contracts | Use `max_retries=0`; this is not verification of unsupported OpenAI API surfaces or long-running application behavior |
+| Unhush Custom Formatting | **Operationally verified (scoped, user-reported)** | Linux AppImage 3.1.0 observed in the reporting environment | User reports practical transcript post-processing through the bridge; formatting source and synthetic request shape checked separately | Formatting only, not STT; bare server URL without `/v1`; bridge token required; transcript text is sent to Codex. Other builds/platforms, full UI, long-session and failure-recovery behavior are not independently reverified |
 | Honcho | **Operationally verified** | Self-hosted request shape based on revision `444897975c95393b0d48024470ece03c025d3aa4` | Repeated derivation, summary/dream/dialectic generation, structured output, memory-search tool continuation, restart, queue, and existing PostgreSQL/Redis continuity | Embeddings require a separate backend; lossless nullable tool-call content currently requires the compatibility fix tracked in [plastic-labs/honcho#1061](https://github.com/plastic-labs/honcho/issues/1061) |
 | LangChain `ChatOpenAI` | **Operationally verified (scoped)** | `langchain-openai` 1.6.0, `langchain-core` 1.6.0, `langgraph` 1.2.11, `langchain` 1.3.17, `langchain-ollama` 1.1.0, `langgraph-checkpoint-sqlite` 3.1.1, OpenAI SDK 3.3.1 | Live non-stream, sync stream, asynchronous Responses streaming with the official aiohttp transport, strict Pydantic output, one-tool and sequential multi-tool Responses, sequential multi-tool Chat, three-turn history, bounded `batch()`/`abatch()` concurrency (4 inputs, maximum 2), recovery after one injected 429 and one mid-stream disconnect, a bounded LangGraph read-only graph, plain-text in-memory RAG through external Ollama `embeddinggemma`, standard `create_agent` in Chat Completions mode, and consumer-side SQLite interrupt/resume | Set `temperature=None`, `max_retries=0`, select `use_responses_api`, install `openai[aiohttp]`, own explicit sync/async clients with `trust_env=False`, set `http_socket_options=()`, and require a typed completed terminal. Persistent vector stores, production-corpus retrieval evaluation, PostgreSQL checkpoints, concurrent checkpoint writers, multiple interrupts, standard-agent Responses mode, daemon longevity, concurrency above 2, and repeated exhaustion/interruption remain unverified |
 | OpenAI Agents SDK | **Live verified (configuration required)** | `openai-agents` 0.21.1, OpenAI SDK 3.2.0 | Live `OpenAIChatCompletionsModel` basic agent and local `function_tool` loop; offline stream contract | Disable tracing; `OpenAIResponsesModel`, sessions, and hosted tools are not verified |
@@ -62,6 +67,7 @@ and production deployment do not install or contact the frameworks' external ser
 ## Configuration recipes
 
 - [OpenAI Python SDK](integrations/openai-python.md)
+- [Unhush Custom Formatting](integrations/unhush.md)
 - [Honcho](integrations/honcho.md)
 - [LangChain](integrations/langchain.md)
 - [OpenAI Agents SDK](integrations/agents.md)

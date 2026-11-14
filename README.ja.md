@@ -168,6 +168,7 @@ tool・reasoning・compactionの継続中は同じaliasを使ってください�
 | コンシューマー | 検証段階 | 主な条件・手順 |
 | --- | --- | --- |
 | OpenAI Python SDK | Live | [自動retryを無効化](docs/integrations/openai-python.ja.md) |
+| Unhush Custom Formatting | Operational・範囲限定・user-reported | [文字起こし後の整形のみ。STTは別backend](docs/integrations/unhush.ja.md) |
 | Honcho | Operational | [テキスト生成のみ。embeddingsは別backend](docs/integrations/honcho.ja.md) |
 | LangChain | Operational・範囲限定 | [明示的なtransport。並列処理・永続化の検証範囲に注意](docs/integrations/langchain.ja.md) |
 | OpenAI Agents SDK | Live・設定が必要 | [Chat Completions model。tracing無効](docs/integrations/agents.ja.md) |

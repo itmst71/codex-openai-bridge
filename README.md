@@ -170,6 +170,7 @@ A row never certifies the entire product. Versions, required adapters, and all e
 | Consumer | Evidence | Main condition / guide |
 | --- | --- | --- |
 | OpenAI Python SDK | Live | [Disable automatic retries](docs/integrations/openai-python.md) |
+| Unhush Custom Formatting | Operational, scoped, user-reported | [Transcript post-processing only; separate STT](docs/integrations/unhush.md) |
 | Honcho | Operational | [Text generation only; separate embeddings](docs/integrations/honcho.md) |
 | LangChain | Operational, scoped | [Explicit transports; scoped concurrency and persistence](docs/integrations/langchain.md) |
 | OpenAI Agents SDK | Live, configured | [Chat Completions model; tracing disabled](docs/integrations/agents.md) |

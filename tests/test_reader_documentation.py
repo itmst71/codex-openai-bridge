@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GUIDES = ("setup", "api", "models", "operations", "service-terms", "integrations")
 CONSUMERS = (
     "openai-python",
+    "unhush",
     "honcho",
     "langchain",
     "agents",
