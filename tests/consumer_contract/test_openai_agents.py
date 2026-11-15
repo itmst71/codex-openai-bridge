@@ -46,8 +46,10 @@ def _model(running_client: object) -> OpenAIChatCompletionsModel:
 
 
 def _assert_framework_versions() -> None:
-    assert version("openai-agents") == "0.21.1"
-    assert version("openai") == "3.2.0"
+    assert (version("openai-agents"), version("openai")) in {
+        ("0.21.1", "3.2.0"),
+        ("0.24.0", "3.51.0"),
+    }
 
 
 @pytest.mark.asyncio

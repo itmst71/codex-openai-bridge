@@ -9,7 +9,7 @@ Save the Python example below as `example.py`. Start the bridge separately; load
 This snippet configures a client/model; it does not itself run a generation. The consuming application owns its execution loop.
 
 ```bash
-uv run --isolated --no-project --with 'autogen-ext[openai]==0.7.5' --with autogen-core==0.7.5 --with openai==3.2.0 python example.py
+uv run --isolated --no-project --with 'autogen-ext[openai]==0.7.5' --with autogen-core==0.7.5 --with openai==3.51.0 python example.py
 ```
 
 AutoGen's OpenAI-compatible model client needs explicit capabilities for the unknown public alias

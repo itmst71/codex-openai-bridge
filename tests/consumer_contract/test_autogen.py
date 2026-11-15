@@ -61,7 +61,7 @@ def _assert_framework_versions() -> None:
     assert version("autogen-ext") == "0.7.5"
     assert version("autogen-core") == "0.7.5"
     assert version("autogen-agentchat") == "0.7.5"
-    assert version("openai") == "3.2.0"
+    assert version("openai") in {"3.2.0", "3.51.0"}
 
 
 def _is_loopback(host: object) -> bool:

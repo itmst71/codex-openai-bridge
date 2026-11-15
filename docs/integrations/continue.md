@@ -4,6 +4,11 @@
 
 English is canonical if translations differ. [README](../../README.md)
 
+The official npm check on 2026-11-15 still identifies core **1.1.0** as latest stable. The separate
+`@continuedev/cli` is **1.5.47**; a core-provider result is not CLI qualification. The npm `gitHead`
+points to a repository `core/package.json` labeled 1.0.13, so the contract's authority is the locked
+published 1.1.0 artifact and its included TypeScript, not a claim of identical versioned repo source.
+
 Continue separates model roles, so the bridge should serve text generation while embeddings and
 autocomplete use other providers. A matching local model entry is:
 

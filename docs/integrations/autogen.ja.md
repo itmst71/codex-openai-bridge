@@ -9,7 +9,7 @@
 この例はclient/modelの設定例であり、単独では生成を実行しません。実行loopは接続するアプリが所有します。
 
 ```bash
-uv run --isolated --no-project --with 'autogen-ext[openai]==0.7.5' --with autogen-core==0.7.5 --with openai==3.2.0 python example.py
+uv run --isolated --no-project --with 'autogen-ext[openai]==0.7.5' --with autogen-core==0.7.5 --with openai==3.51.0 python example.py
 ```
 
 AutoGen の OpenAI-compatible model client では、未知の public alias に対する capabilities を明示し、sampling/name fields を省略する必要があります。

@@ -170,11 +170,11 @@ A row never certifies the entire product. Versions, required adapters, and all e
 | Consumer | Evidence | Main condition / guide |
 | --- | --- | --- |
 | OpenAI Python SDK | Live | [Disable automatic retries](docs/integrations/openai-python.md) |
-| Unhush Custom Formatting | Operational, scoped | [Pinned contracts, packaged formatter and real Codex; separate STT](docs/integrations/unhush.md) |
-| Honcho | Operational | [Text generation only; separate embeddings](docs/integrations/honcho.md) |
-| LangChain | Operational, scoped | [Explicit transports; scoped concurrency and persistence](docs/integrations/langchain.md) |
+| Unhush Custom Formatting | Live, source client | [Latest formatter; historical packaged evidence; separate STT](docs/integrations/unhush.md) |
+| Honcho | Contract, native backend/codec; historical Operational | [Latest backend/codec; separate full-service history and embeddings](docs/integrations/honcho.md) |
+| LangChain | Live, scoped | [Latest ChatOpenAI; older operational campaign kept separate](docs/integrations/langchain.md) |
 | OpenAI Agents SDK | Live, configured | [Chat Completions model; tracing disabled](docs/integrations/agents.md) |
-| AutoGen | Contract, adapter required | [Explicit capabilities and conditional tools adapter](docs/integrations/autogen.md) |
+| AutoGen | Live, direct client | [Explicit capabilities; tool/reflection adapter contract](docs/integrations/autogen.md) |
 | Aider | Contract, constrained | [One-shot whole-file edit only](docs/integrations/aider.md) |
 | Cline CLI | Live, constrained | [Headless three-tool local edit only](docs/integrations/cline.md) |
 | Continue core | Contract, component only | [Chat/Edit provider, not the full IDE or CLI](docs/integrations/continue.md) |

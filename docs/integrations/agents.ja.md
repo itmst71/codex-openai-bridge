@@ -9,7 +9,7 @@
 この例はclient/modelの設定例であり、単独では生成を実行しません。実行loopは接続するアプリが所有します。
 
 ```bash
-uv run --isolated --no-project --with openai-agents==0.21.1 --with openai==3.2.0 python example.py
+uv run --isolated --no-project --with openai-agents==0.24.0 --with openai==3.51.0 python example.py
 ```
 
 ```python
@@ -36,4 +36,7 @@ model = OpenAIChatCompletionsModel(model="codex", openai_client=client)
 agent = Agent(name="bounded-agent", instructions="Answer briefly.", model=model)
 ```
 
-検証済みのブリッジ専用 configuration では tracing を無効にします。tracing は別の external API surface だからです。nonempty docstrings を持つ local `function_tool` calls は検証済みです。Agents SDK の `OpenAIResponsesModel` は現在、厳格なブリッジ Responses subset の範囲外の fields を送信します。SDK 全体を非対応とみなしたりブリッジ parser を緩和したりせず、検証済みの Chat Completions model を使用してください。
+検証済みのbridge専用設定では、別のexternal API surfaceであるtracingを無効にします。
+nonempty docstringを持つlocal `function_tool`はcontract検証済みで、最新版のlive試験はbasic Chat modelとstreamingを対象とします。
+`OpenAIResponsesModel`はこのlaneでは未検証です。旧0.21.1のprobeではstrict Responses subset外のfieldを送信しましたが、
+0.24.0のResponses対応を再検証した結果ではありません。bridge parserを緩めず、検証済みChat modelを使ってください。

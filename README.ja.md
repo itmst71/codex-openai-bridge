@@ -168,11 +168,11 @@ tool・reasoning・compactionの継続中は同じaliasを使ってください�
 | コンシューマー | 検証段階 | 主な条件・手順 |
 | --- | --- | --- |
 | OpenAI Python SDK | Live | [自動retryを無効化](docs/integrations/openai-python.ja.md) |
-| Unhush Custom Formatting | Operational・範囲限定 | [固定contract・実packageの整形・実Codex。STTは別backend](docs/integrations/unhush.ja.md) |
-| Honcho | Operational | [テキスト生成のみ。embeddingsは別backend](docs/integrations/honcho.ja.md) |
-| LangChain | Operational・範囲限定 | [明示的なtransport。並列処理・永続化の検証範囲に注意](docs/integrations/langchain.ja.md) |
+| Unhush Custom Formatting | Live・source client | [最新formatterと旧実packageの根拠を分離。STTは別backend](docs/integrations/unhush.ja.md) |
+| Honcho | Contract・native backend/codec、旧Operational | [最新backend/codecと旧full-service実績を分離。embeddingsは別](docs/integrations/honcho.ja.md) |
+| LangChain | Live・範囲限定 | [最新ChatOpenAIと旧実運用試験を分けて記録](docs/integrations/langchain.ja.md) |
 | OpenAI Agents SDK | Live・設定が必要 | [Chat Completions model。tracing無効](docs/integrations/agents.ja.md) |
-| AutoGen | Contract・adapterが必要 | [明示的なcapabilitiesと条件付きtools adapter](docs/integrations/autogen.ja.md) |
+| AutoGen | Live・direct client | [明示的なcapabilities。tool/reflection adapterはcontract](docs/integrations/autogen.ja.md) |
 | Aider | Contract・用途限定 | [単発のwhole-file editのみ](docs/integrations/aider.ja.md) |
 | Cline CLI | Live・用途限定 | [headless・3つのlocal toolによる編集のみ](docs/integrations/cline.ja.md) |
 | Continue core | Contract・componentのみ | [Chat/Edit provider。IDEやCLI全体ではない](docs/integrations/continue.ja.md) |

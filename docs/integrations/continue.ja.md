@@ -4,6 +4,10 @@
 
 英語版を正本（canonical）とします。 [README](../../README.ja.md)
 
+2026-11-15の公式npm確認でもcoreのlatest stableは**1.1.0**です。別artifactの`@continuedev/cli`は**1.5.47**で、
+core providerの成功をCLIの検証とは扱いません。npm `gitHead`先の`core/package.json`は1.0.13表記のため、
+contractの正本はlockした公開1.1.0 artifactと同梱TypeScriptであり、version付きrepo sourceとの完全同一性は主張しません。
+
 Continue は model roles を分離するため、ブリッジは text generation を担当し、embeddings と autocomplete には他の providers を使用してください。対応する local model entry は次のとおりです。
 
 ```yaml

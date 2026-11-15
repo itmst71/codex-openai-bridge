@@ -9,7 +9,7 @@ Save the Python example below as `example.py`. Start the bridge separately; load
 This snippet configures a client/model; it does not itself run a generation. The consuming application owns its execution loop.
 
 ```bash
-uv run --isolated --no-project --with openai-agents==0.21.1 --with openai==3.2.0 python example.py
+uv run --isolated --no-project --with openai-agents==0.24.0 --with openai==3.51.0 python example.py
 ```
 
 ```python
@@ -37,7 +37,7 @@ agent = Agent(name="bounded-agent", instructions="Answer briefly.", model=model)
 ```
 
 Tracing is disabled in the verified bridge-only configuration because tracing is a separate external
-API surface. Local `function_tool` calls with nonempty docstrings are verified. The Agents SDK's
-`OpenAIResponsesModel` currently emits fields outside the strict bridge Responses subset; use the
-verified Chat Completions model rather than treating the entire SDK as unsupported or relaxing the
-bridge parser.
+API surface. Local `function_tool` calls with nonempty docstrings are contract verified; the latest
+live slice covers the basic Chat model and streaming. `OpenAIResponsesModel` is not qualified by
+this lane. The older 0.21.1 probe emitted fields outside the strict Responses subset; that is not a
+new test of 0.24.0 Responses support. Use the verified Chat model without relaxing the bridge parser.

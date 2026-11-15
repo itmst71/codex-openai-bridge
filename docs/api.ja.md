@@ -93,8 +93,11 @@ pending callが残る間のreasoning挿入は拒否します。
 
 Developer messages は明示的な content-part form を使用します。Assistant replay items では、実環境で検証済みの `completed`、`in_progress`、`incomplete` status values と、任意の `commentary`/`final_answer` phase を受理します。Encrypted reasoning と compaction blobs は opaque replay authority として扱われます。ブリッジは内容をログに記録したり復号したりせず、bounds、ordering、identity、duplication を検証します。
 
-検証済みの reasoning summaries は、クライアントが `reasoning.summary` を明示的に要求した場合に限って公開されます。要求されていない nonempty upstream summary は拒否されます。確認済みの assistant `phase` は、SDK 3.1.0 では typed field として、SDK 1.109.1 では `model_extra` を介して保持されます。
+検証済みの reasoning summaries は、クライアントが `reasoning.summary` を明示的に要求した場合に限って公開されます。要求されていない nonempty upstream summary は拒否されます。確認済みの assistant `phase` はSDK 3.51.0でtyped fieldとして（旧3.1.0でも検証済み）、SDK 1.109.1では`model_extra`を介して保持されます。
 
 Custom-tool streaming は、backend の正確な item/input-delta lifecycle を SDK 形式の events に正規化し、provider obfuscation metadata を取り除きます。また、terminal output が省略されている場合、または完了済み items と完全一致する snapshot の場合に対応します。Provider metadata events は identity を検証したうえで破棄し、その内容を公開しません。検証済みの、両方が存在する identifier variant または両方が null の identifier variant のみを受理します。null identifiers は、衝突確認を行った決定的な public identifiers に置き換えられます。`stream_options.include_obfuscation=false` の場合、provider obfuscation field が省略されていても受理します。一方、存在するすべての obfuscation values には制限を適用し、検証します。
 
-Offline contract tests は、固定した OpenAI Python SDK 1.109.1 と、別途 OpenAI Python SDK 3.1.0 に対して実行されます。Native compaction の typed SDK contract があるのは 3.1.0 のみです。共通の Responses request、function/custom tool、non-stream、stream subset は両方でテストされます。
+Offline contract testsは固定したOpenAI Python SDK 1.109.1と、別途3.51.0に対して実行します。
+Native compactionのtyped contractは3.51.0 laneにあり、legacy1.109.1 laneにはありません。
+共通のResponses request・function/custom tool・non-stream・stream subsetは両方でテストします。
+旧3.1.0の結果は過去のbaselineで、現在のCI pinではありません。

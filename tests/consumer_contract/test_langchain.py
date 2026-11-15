@@ -66,9 +66,14 @@ def _text(value: object) -> str:
 
 
 def _assert_framework_versions() -> None:
-    assert version("langchain-openai") == "1.5.1"
-    assert version("langchain-core") == "1.5.6"
-    assert version("openai") == "3.2.0"
+    assert (
+        version("langchain-openai"),
+        version("langchain-core"),
+        version("openai"),
+    ) in {
+        ("1.5.1", "1.5.6", "3.2.0"),
+        ("1.8.0", "1.8.0", "3.51.0"),
+    }
 
 
 def _assert_no_sampling_projection(payload: dict[str, Any]) -> None:

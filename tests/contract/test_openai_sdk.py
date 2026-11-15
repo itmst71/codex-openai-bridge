@@ -28,7 +28,7 @@ def _assert_cache_write_tokens(input_details: object, expected: int) -> None:
     model_fields = getattr(type(input_details), "model_fields", {})
     model_extra = getattr(input_details, "model_extra", None)
     if "cache_write_tokens" in model_fields:
-        assert openai.__version__ == "3.1.0"
+        assert openai.__version__ in {"3.1.0", "3.51.0"}
         assert cast(Any, input_details).cache_write_tokens == expected
         assert not model_extra or "cache_write_tokens" not in model_extra
     else:
@@ -47,7 +47,7 @@ def _assert_message_phase(message: object, expected: str) -> None:
     model_fields = getattr(type(message), "model_fields", {})
     model_extra = getattr(message, "model_extra", None)
     if "phase" in model_fields:
-        assert openai.__version__ == "3.1.0"
+        assert openai.__version__ in {"3.1.0", "3.51.0"}
         assert cast(Any, message).phase == expected
         assert not model_extra or "phase" not in model_extra
     else:

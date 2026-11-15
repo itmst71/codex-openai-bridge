@@ -1,0 +1,438 @@
+{
+  "schema_version": 1,
+  "checked_on": "2026-11-15",
+  "consumer_count": 9,
+  "bridge_base": "39e0ab613ade4c194ffef1486d26078c2d07815f",
+  "selection_policy": "Official published stable, excluding preview/dev/yanked where applicable; exact artifact surface, not newest dependency forced into a publisher pin",
+  "consumers": [
+    {
+      "id": "openai-python",
+      "latest_stable": {
+        "version": "3.51.0",
+        "checked_at": "2026-11-15T08:26:17.282359+00:00",
+        "published_at": "2026-11-13T21:13:37.969795Z",
+        "source_url": "https://pypi.org/pypi/openai/json",
+        "requires_python": ">=3.10",
+        "source_metadata_sha256": "46d6694b9259b53832408ff1bad8eaecf6472a0b0e7063bd1b7abe311dbc51a1"
+      },
+      "tested_tuple": {
+        "openai": "3.51.0",
+        "python": "3.12.3"
+      },
+      "qualification": {
+        "level": "live",
+        "contract_case_count": 21,
+        "live_case_count": 4,
+        "scope": [
+          "actual typed SDK Chat/Responses contracts",
+          "async buffered/streamed real-Codex text"
+        ],
+        "not_verified": [
+          "other OpenAI API surfaces",
+          "long-running application behavior"
+        ],
+        "contract_case_ids": [
+          "tests.contract.test_openai_sdk::test_chat_nonstream_text_and_models_list_use_typed_sdk_interfaces",
+          "tests.contract.test_openai_sdk::test_responses_message_phase_is_preserved_by_sdk_version",
+          "tests.contract.test_openai_sdk::test_chat_stream_async_iterator_includes_terminal_usage",
+          "tests.contract.test_openai_sdk::test_chat_function_call_tool_result_then_final_response",
+          "tests.contract.test_openai_sdk::test_chat_response_format_json_modes[response_format0-expected_format0]",
+          "tests.contract.test_openai_sdk::test_chat_response_format_json_modes[response_format1-expected_format1]",
+          "tests.contract.test_openai_sdk::test_responses_create_and_stream_get_final_response",
+          "tests.contract.test_openai_sdk::test_responses_confirmed_request_controls_use_typed_sdk_surface",
+          "tests.contract.test_openai_sdk::test_responses_buffered_reasoning_preserves_typed_summary",
+          "tests.contract.test_openai_sdk::test_responses_buffered_rejects_unsolicited_reasoning_summary",
+          "tests.contract.test_openai_sdk::test_responses_buffered_usage_preserves_cache_write_tokens",
+          "tests.contract.test_openai_sdk::test_responses_buffered_usage_keeps_absent_cache_write_tokens_absent",
+          "tests.contract.test_openai_sdk::test_responses_stream_usage_preserves_cache_write_tokens",
+          "tests.contract.test_openai_sdk::test_responses_stream_reasoning_preserves_typed_summary",
+          "tests.contract.test_openai_sdk::test_responses_stream_rejects_unsolicited_reasoning_summary",
+          "tests.contract.test_openai_sdk::test_responses_buffered_custom_tool_call_output_roundtrip_uses_common_sdk_types",
+          "tests.contract.test_openai_sdk::test_responses_custom_tool_stream_restores_typed_final_output",
+          "tests.contract.test_openai_sdk::test_responses_custom_tool_stream_accepts_disabled_obfuscation",
+          "tests.contract.test_openai_sdk::test_current_sdk_parses_native_compaction_output",
+          "tests.contract.test_openai_sdk::test_current_sdk_streams_native_compaction_lifecycle",
+          "tests.contract.test_openai_sdk::test_embeddings_return_clear_openai_unsupported_error"
+        ],
+        "contract_receipt_sha256": "15fb3d6cf3aac9ebe7c2c1c6e4716d6435c94039c62956efc9db0f4f53b86b88"
+      }
+    },
+    {
+      "id": "unhush",
+      "latest_stable": {
+        "version": "3.3.4",
+        "checked_at": "2026-11-15T08:25:53.779841Z",
+        "published_at": "2026-10-27T11:41:45Z",
+        "source_url": "https://api.github.com/repos/propriaworks/unhush/releases/latest",
+        "revision": "657352ea22c0738fe1c3a26005c2365032d02746"
+      },
+      "tested_tuple": {
+        "unhush": "3.3.4",
+        "esbuild": "0.28.1",
+        "node": "24.22.1",
+        "source_revision": "657352ea22c0738fe1c3a26005c2365032d02746"
+      },
+      "qualification": {
+        "level": "live",
+        "contract_case_count": 13,
+        "live_case_count": 3,
+        "scope": [
+          "unmodified pinned source formatter and warmup contract",
+          "warmup Off keeps skipped status without model POST",
+          "three real-Codex formatter repeats"
+        ],
+        "not_verified": [
+          "3.3.4 packaged RecordingBar/stop/fallback/length/native90s/UI/restart",
+          "microphone/STT and ordinary desktop output",
+          "new AppImage was not executed"
+        ],
+        "contract_case_ids": [
+          "tests.consumer_contract.test_unhush::test_unhush_real_formatter_uses_strict_bridge",
+          "tests.consumer_contract.test_unhush::test_unhush_disabled_warmup_reports_skipped_without_model_request",
+          "tests.consumer_contract.test_unhush::test_unhush_actual_warmup_is_user_only_and_waits_for_content",
+          "tests.consumer_contract.test_unhush::test_unhush_formatter_rejects_error_or_empty_response_without_retry[401]",
+          "tests.consumer_contract.test_unhush::test_unhush_formatter_rejects_error_or_empty_response_without_retry[429]",
+          "tests.consumer_contract.test_unhush::test_unhush_formatter_rejects_error_or_empty_response_without_retry[503]",
+          "tests.consumer_contract.test_unhush::test_unhush_formatter_rejects_error_or_empty_response_without_retry[empty]",
+          "tests.consumer_contract.test_unhush::test_unhush_formatter_rejects_error_or_empty_response_without_retry[malformed]",
+          "tests.consumer_contract.test_unhush::test_unhush_warmup_rejects_200_with_empty_content",
+          "tests.consumer_contract.test_unhush::test_unhush_failed_warmup_recovers_after_injected_cooldown",
+          "tests.consumer_contract.test_unhush::test_unhush_formatter_maps_injected_timeout_to_failure",
+          "tests.consumer_contract.test_unhush::test_unhush_contract_transport_refuses_nonloopback_egress",
+          "tests.consumer_contract.test_unhush::test_unhush_repeated_formatter_calls_remain_distinct"
+        ],
+        "contract_receipt_sha256": "27cdd3aa9c7efe547c5e1d6ed0c565f1467c71f7d252a5629253adc6b1b48e9f"
+      },
+      "source_files_sha256": {
+        "package.json": "21d819b8b357d36ea5cbee9f3ff20e7399bdf0e65d7560a5bf0f0e5892c378ad",
+        "src/audio/llmApi.ts": "54dd190820b6a0f97ae4558e25b3126b0808281829396f39b5ad6166b7c08a5d",
+        "src/audio/customModelService.ts": "c91c10c8c3c4eb497fc8bbb48031debd2832abd2b2a62c308bb972d26df65b31",
+        "src/audio/transcriptionApi.ts": "9260346cf085a381a8a9e4cb8cf1edaf59cca8af3959f117c2a62d41e0c5a128"
+      },
+      "latest_package_asset": {
+        "appimage_sha256": "5ee0b04967eaf4e0f3d309fe05b0ef5ac4c98b04d9ebd288e5e04870bd8d4fc9",
+        "squashfs_offset": 188392,
+        "asar_sha256": "da31bd7139a578fb44b3339fa3442158b45f59c2da19f04016b32facacec4b80",
+        "executed": false
+      }
+    },
+    {
+      "id": "honcho",
+      "latest_stable": {
+        "version": "3.6.1",
+        "checked_at": "2026-11-15T08:25:53.766072Z",
+        "published_at": "2026-11-11T16:21:35Z",
+        "source_url": "https://api.github.com/repos/plastic-labs/honcho/releases/latest",
+        "revision": "70c67624169683b9e265517aec95a51b8077cabc"
+      },
+      "tested_tuple": {
+        "honcho-server": "3.6.1",
+        "python": "3.13.15",
+        "openai": "3.51.0",
+        "pydantic": "2.14.3",
+        "bridge_python": "3.12.3",
+        "bridge_openai": "1.109.1",
+        "bridge_pydantic": "2.13.4"
+      },
+      "qualification": {
+        "level": "contract",
+        "contract_case_count": 6,
+        "live_case_count": 0,
+        "scope": [
+          "six genuine backend/codec contracts from Python3.13 to a separate actual bridge Python3.12 process",
+          "text, native schema with and without tools, streaming and null-preserving codec continuation",
+          "normal imports without source or SDK stubs; unchanged six original test bodies"
+        ],
+        "not_verified": [
+          "real provider, fullservice, DB and Redis",
+          "formal bridge Python3.13 runtime support"
+        ],
+        "contract_case_ids": [
+          "test_native_text_complete",
+          "test_native_schema_without_tools_parse",
+          "test_native_text_stream",
+          "test_native_schema_with_tools_create",
+          "test_native_schema_stream_create",
+          "test_native_tool_null_codec_continuation"
+        ],
+        "contract_receipt_sha256": "2e74f39ef34ca3516c70812a36f076b2849c6b7ab37dd833a95e49af96355002"
+      },
+      "cross_runtime_trial": {
+        "separate_processes": true,
+        "bridge_declared_python": ">=3.12,<3.13",
+        "http_request_count": 7,
+        "synthetic_upstream_call_count": 7,
+        "http_status_counts": {"200": 7},
+        "source_file_hashes_verified": 1261,
+        "cleanup": {
+          "bridge_children_joined": 6,
+          "bridge_children_exit_zero": true,
+          "remaining_listeners": 0,
+          "remaining_namespace_processes": 0
+        },
+        "verification_receipt_sha256": "bca60d431b788b7cb4059cb645da06a32ff1124f9ae6dae451abe26e487c12c4"
+      },
+      "earlier_source_probe": {
+        "native_cases": 6,
+        "upstream_unit_regressions": 4,
+        "http_requests": 7,
+        "all_http_200": true,
+        "runtime_caveat": "bridge source imported on3.13 outside declared>=3.12,<3.13; not formal declared-runtime qualification"
+      }
+    },
+    {
+      "id": "langchain",
+      "latest_stable": {
+        "version": "1.8.0",
+        "checked_at": "2026-11-15T08:26:17.283071+00:00",
+        "published_at": "2026-11-13T16:48:10.728001Z",
+        "source_url": "https://pypi.org/pypi/langchain-openai/json",
+        "requires_python": "<4.0.0,>=3.11.0",
+        "source_metadata_sha256": "a5f13ab8071930f52e7caa16df6a460fb914dcc1607b528f4b7dea81b9a475d2"
+      },
+      "tested_tuple": {
+        "langchain-openai": "1.8.0",
+        "langchain-core": "1.8.0",
+        "langchain": "1.5.0",
+        "langgraph": "1.2.22",
+        "langchain-ollama": "1.1.0",
+        "langgraph-checkpoint-sqlite": "3.1.3",
+        "openai": "3.51.0",
+        "python": "3.12.3"
+      },
+      "qualification": {
+        "level": "live",
+        "contract_case_count": 5,
+        "live_case_count": 4,
+        "scope": [
+          "five actual ChatOpenAI contracts",
+          "real Chat/Responses text, Chat local tool roundtrip and Responses Pydantic schema"
+        ],
+        "not_verified": [
+          "latest RAG/LangGraph/SQLite/HITL and failure/concurrency operational campaign",
+          "daemon longevity or production retrieval evaluation"
+        ],
+        "contract_case_ids": [
+          "tests.consumer_contract.test_langchain::test_langchain_responses_nonstream_uses_strict_bridge_contract",
+          "tests.consumer_contract.test_langchain::test_langchain_responses_stream_reaches_clean_terminal",
+          "tests.consumer_contract.test_langchain::test_langchain_responses_json_schema_returns_pydantic_model",
+          "tests.consumer_contract.test_langchain::test_langchain_function_tool_roundtrip[True]",
+          "tests.consumer_contract.test_langchain::test_langchain_function_tool_roundtrip[False]"
+        ],
+        "contract_receipt_sha256": "0d9220c85a8ec5f7e9abb278868b1105424d00f4809ba90871060739e1fb7c09"
+      }
+    },
+    {
+      "id": "agents",
+      "latest_stable": {
+        "version": "0.24.0",
+        "checked_at": "2026-11-15T08:26:17.382924+00:00",
+        "published_at": "2026-10-15T02:38:18.835400Z",
+        "source_url": "https://pypi.org/pypi/openai-agents/json",
+        "requires_python": ">=3.10",
+        "source_metadata_sha256": "8e308a421c2b689cc0b61c02f6037c038582f755d1a5c6a4daa75d017c8cdfa5"
+      },
+      "tested_tuple": {
+        "openai-agents": "0.24.0",
+        "openai": "3.51.0",
+        "python": "3.12.3"
+      },
+      "qualification": {
+        "level": "live",
+        "contract_case_count": 3,
+        "live_case_count": 2,
+        "scope": [
+          "three actual Chat model contracts",
+          "real basic Runner and Chat streaming"
+        ],
+        "not_verified": [
+          "ResponsesModel",
+          "sessions and hosted tools",
+          "latest real-provider local-tool loop"
+        ],
+        "contract_case_ids": [
+          "tests.consumer_contract.test_openai_agents::test_openai_agents_chat_model_completes_without_external_tracing",
+          "tests.consumer_contract.test_openai_agents::test_openai_agents_chat_model_stream_reaches_clean_terminal",
+          "tests.consumer_contract.test_openai_agents::test_openai_agents_chat_model_executes_local_function_tool_loop"
+        ],
+        "contract_receipt_sha256": "27b69c401998eabab562cc013f9c4a5a08baff900fc914326f7f0c645e50d336"
+      }
+    },
+    {
+      "id": "autogen",
+      "latest_stable": {
+        "version": "0.7.5",
+        "checked_at": "2026-11-15T08:26:17.425326+00:00",
+        "published_at": "2025-09-30T06:16:22.832378Z",
+        "source_url": "https://pypi.org/pypi/autogen-ext/json",
+        "requires_python": ">=3.10",
+        "source_metadata_sha256": "9a2ae8a26962a1117b550458c9fc2a9d1d4388eeb6b94da37edfe84d5750e0de"
+      },
+      "tested_tuple": {
+        "autogen-ext": "0.7.5",
+        "autogen-core": "0.7.5",
+        "autogen-agentchat": "0.7.5",
+        "openai": "3.51.0",
+        "python": "3.12.3"
+      },
+      "qualification": {
+        "level": "live",
+        "contract_case_count": 3,
+        "live_case_count": 2,
+        "scope": [
+          "three direct/schema/tool-reflection adapter contracts",
+          "real direct model client text and streaming"
+        ],
+        "not_verified": [
+          "latest live AssistantAgent reflection loop",
+          "teams, memory, code execution and hosted agents"
+        ],
+        "contract_case_ids": [
+          "tests.consumer_contract.test_autogen::test_autogen_loopback_guard_rejects_nonloopback_network",
+          "tests.consumer_contract.test_autogen::test_autogen_model_client_text_stream_and_structured_output",
+          "tests.consumer_contract.test_autogen::test_autogen_assistant_agent_executes_local_tool_and_reflects"
+        ],
+        "contract_receipt_sha256": "2f039ce10bd452af4d21cf9c2a2a3e7cdc7fc8c8fa8ae8e56e3b6d26d24416b0"
+      }
+    },
+    {
+      "id": "aider",
+      "latest_stable": {
+        "version": "0.86.2",
+        "checked_at": "2026-11-15T08:26:17.478429+00:00",
+        "published_at": "2026-02-12T00:42:52.678771Z",
+        "source_url": "https://pypi.org/pypi/aider-chat/json",
+        "requires_python": "<3.13,>=3.10",
+        "source_metadata_sha256": "cb124f46f966faa741bc675c76956b3c6fd50ed2e9bb8b0b0e7b6aba24afaf36"
+      },
+      "tested_tuple": {
+        "aider-chat": "0.86.2",
+        "litellm": "1.81.10",
+        "openai": "2.20.0",
+        "python": "3.12.3"
+      },
+      "qualification": {
+        "level": "contract",
+        "contract_case_count": 2,
+        "live_case_count": 0,
+        "scope": [
+          "native egress negative control",
+          "one-file streaming whole-format edit contract"
+        ],
+        "not_verified": [
+          "live sustained use",
+          "interactive/auto-commit/repo-map/architect and other edit formats"
+        ],
+        "contract_case_ids": [
+          "tests.consumer_contract.test_aider::test_aider_contract_egress_guard_rejects_nonloopback_resolution",
+          "tests.consumer_contract.test_aider::test_aider_cli_applies_streaming_whole_file_edit_without_other_side_effects"
+        ],
+        "contract_receipt_sha256": "4be9f71ea098eda6bdeaf9d1c6dcaba7472ef28e369a5901aa822936804a855d"
+      },
+      "dependency_policy": "respect publisher exact pins, not force independently newest dependencies"
+    },
+    {
+      "id": "cline",
+      "latest_stable": {
+        "version": "3.0.74",
+        "checked_at": "2026-11-15T08:25:53.711279Z",
+        "published_at": "2026-10-26T04:05:37.517Z",
+        "source_url": "https://registry.npmjs.org/@cline%2fcli-linux-x64",
+        "revision": "071e1b25b48f9ef5dff7fc32085e6a16f02bf02e"
+      },
+      "tested_tuple": {
+        "@cline/cli-linux-x64": "3.0.74",
+        "platform": "linux-x64"
+      },
+      "qualification": {
+        "level": "live",
+        "contract_case_count": 2,
+        "live_case_count": 1,
+        "scope": [
+          "native egress negative control and deterministic three-call contract",
+          "one real-Codex exact file edit with four calls of three allowed tool types"
+        ],
+        "not_verified": [
+          "default prompt and control plane",
+          "other platforms, IDE/TUI, shell/web/MCP/subagent/team roles",
+          "non-idempotent external tools and longevity"
+        ],
+        "contract_case_ids": [
+          "tests.consumer_contract.test_cline_cli::test_cline_native_guard_rejects_direct_nonloopback_connect",
+          "tests.consumer_contract.test_cline_cli::test_cline_cli_reads_edits_and_submits_without_other_side_effects"
+        ],
+        "contract_receipt_sha256": "5ee3da0796223c0392f74fd526e27a2e9b3ec2458031b7e659a4137fc89df32a"
+      }
+    },
+    {
+      "id": "continue-core",
+      "latest_stable": {
+        "version": "1.1.0",
+        "checked_at": "2026-11-15T08:25:54.080161Z",
+        "published_at": "2025-03-14T23:43:51.621Z",
+        "source_url": "https://registry.npmjs.org/@continuedev%2fcore",
+        "revision": "deb3c36943a62d65910e58ad9d3e14557a0ee213"
+      },
+      "tested_tuple": {
+        "@continuedev/core": "1.1.0",
+        "tsx": "4.23.12",
+        "node": "24.22.1",
+        "unused_sqlite_logger": "locked stub, logger disabled"
+      },
+      "qualification": {
+        "level": "contract",
+        "contract_case_count": 3,
+        "live_case_count": 0,
+        "scope": [
+          "native Node egress controls",
+          "published artifact public Chat/Edit/tool-result component contract"
+        ],
+        "not_verified": [
+          "cnCLI1.5.47 and IDE UI",
+          "Apply/file mutation, autocomplete, embeddings and longevity",
+          "npm gitHead source package version differs from published artifact"
+        ],
+        "contract_case_ids": [
+          "tests.consumer_contract.test_continue_core::test_continue_node_egress_guard_rejects_nonloopback_network[require('node:dns').lookup('nonloopback.invalid', () => {})]",
+          "tests.consumer_contract.test_continue_core::test_continue_node_egress_guard_rejects_nonloopback_network[require('node:net').connect({host: '203.0.113.1', port: 9})]",
+          "tests.consumer_contract.test_continue_core::test_continue_core_chat_edit_and_tool_roundtrip"
+        ],
+        "contract_receipt_sha256": "d863cbe1c6bd3b9d07b7b1f0621578e007674a9df18a5f5f1f0bd332465336e6"
+      }
+    }
+  ],
+  "live_trial": {
+    "checked_at": "2026-11-15T09:08:09.172229+00:00",
+    "case_count": 16,
+    "api_request_count": 21,
+    "http_status_counts": {
+      "200": 21
+    },
+    "path_counts": {
+      "/v1/chat/completions": 16,
+      "/v1/responses": 4,
+      "/v1/models": 1
+    },
+    "cleanup": {
+      "server_exit_code": 0,
+      "server_pid_gone": true,
+      "listener_closed": true
+    }
+  },
+  "historical_boundaries": [
+    "Old Honcho444897975c95393b0d48024470ece03c025d3aa4 operational evidence is not transferred to3.6.1",
+    "Old LC1.6/OpenAI3.3.1 operational RAG/Graph/HITL campaign remains historical",
+    "Old Unhush3.1.0 packaged20case receipt remains separate from latest3.3.4 source qualification"
+  ],
+  "shared_sdk_ci_checks": {
+    "sdk_cases": 21,
+    "historical_honcho_shape_cases": 7,
+    "cache_write_checks": 114,
+    "total": 142
+  },
+  "limitations": [
+    "Synthetic inputs and finite cases, not a full product capability guarantee",
+    "Manual live/native Honcho probes are not reproduced automatically by the current CI",
+    "No production checkout/service/settings/data deployment in this update"
+  ]
+}

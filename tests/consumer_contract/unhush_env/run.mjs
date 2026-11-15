@@ -30,11 +30,17 @@ const values = new Map(Object.entries({
 }));
 globalThis.localStorage = {getItem: key => values.get(key) ?? null};
 const warnings = [];
+let startCommandCalls = 0;
+const refuseStartCommand = () => {
+  startCommandCalls += 1;
+  throw new Error("unexpected Start Command");
+};
 globalThis.window = {electronAPI: {
   setFormatterWarning: (reason, enabled) => warnings.push({reason, enabled}),
   setTranscriptionWarning: () => {throw new Error("unexpected STT path");},
   log: () => {},
-  runCommand: () => {throw new Error("unexpected Start Command");},
+  runCommand: refuseStartCommand,
+  spawnDetached: refuseStartCommand,
 }};
 const deadlines = [];
 const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
@@ -74,7 +80,7 @@ for (const action of input.actions ?? [{operation: "format"}]) {
         await new Promise(resolve => setTimeout(resolve, 5));
       }
       const status = client.getLLMWarmupStatus();
-      results.push({ok: status === "ready", status});
+      results.push({ok: status === "ready" || status === "skipped", status});
     } else if (action.operation === "format") {
       const config = client.getLLMConfig();
       const output = await client.postProcessTranscript(action.transcript ?? "A synthetic transcript.", config);
@@ -87,4 +93,5 @@ for (const action of input.actions ?? [{operation: "format"}]) {
   }
 }
 console.log(JSON.stringify({version: receipt.version, revision: receipt.revision, results,
-  requests, deadlines, blocked, warnings, startCommand: "disabled", transcription: "disabled"}));
+  requests, deadlines, blocked, warnings, startCommand: "disabled", startCommandCalls,
+  transcription: "disabled"}));

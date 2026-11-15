@@ -7,7 +7,7 @@
 以下のPython例を`example.py`として保存します。bridgeは別terminalで起動し、追加packageはconsumer用の隔離環境で読み込みます。例は互換alias `codex`を使います。`/v1/models`に掲載されていることを確認し、discoveryのクイックスタートと同じ設定にするなら`selected_model`を`default`へ変更してください。static modeでは`codex`を使います。
 
 ```bash
-uv run --isolated --no-project --with openai==1.109.1 python example.py
+uv run --isolated --no-project --with openai==3.51.0 python example.py
 ```
 
 ```python

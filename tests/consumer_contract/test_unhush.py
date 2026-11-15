@@ -1,4 +1,4 @@
-"""Unmodified, hash-pinned Unhush 3.1.0 formatting client against loopback fixtures."""
+"""Unmodified, hash-pinned Unhush 3.3.4 formatting client against loopback fixtures."""
 
 from __future__ import annotations
 
@@ -70,8 +70,9 @@ async def run_client(tmp_path: Path, url: str, **options: Any) -> dict[str, Any]
         )
         assert code == 0, stderr.decode()
         result: dict[str, Any] = json.loads(stdout)
-        assert result["version"] == "3.1.0"
-        assert result["revision"] == "139154996aa4002165526a5f4fcb8c282573d8c4"
+        assert result["version"] == "3.3.4"
+        assert result["revision"] == "657352ea22c0738fe1c3a26005c2365032d02746"
+        assert result["startCommandCalls"] == 0
         return result
     finally:
         if process.returncode is None:
@@ -134,6 +135,21 @@ async def test_unhush_real_formatter_uses_strict_bridge(tmp_path: Path) -> None:
     assert len(running.upstream.calls) == 1
     assert_server_policy(running.upstream.calls[0], stream=False)
     assert "max_tokens" not in running.upstream.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_unhush_disabled_warmup_reports_skipped_without_model_request(tmp_path: Path) -> None:
+    async with response_fixture("normal") as url:
+        result = await run_client(
+            tmp_path,
+            url,
+            settings={"unhush_llm_custom_warmup": "false"},
+            actions=[{"operation": "warmup"}],
+        )
+    assert result["results"] == [{"ok": True, "status": "skipped"}]
+    assert result["blocked"] == 0
+    assert all(request["method"] == "GET" for request in result["requests"])
+    assert 90000 not in result["deadlines"]
 
 
 @pytest.mark.asyncio

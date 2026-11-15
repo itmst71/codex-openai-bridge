@@ -36,7 +36,7 @@ def _assert_installation() -> None:
     assert platform.system() == "Linux"
     assert platform.machine() in {"x86_64", "amd64"}
     assert _CLINE_BIN.exists()
-    assert _package_version("@cline/cli-linux-x64") == "3.0.55"
+    assert _package_version("@cline/cli-linux-x64") in {"3.0.55", "3.0.74"}
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -448,8 +448,6 @@ async def test_cline_cli_reads_edits_and_submits_without_other_side_effects(tmp_
             str(_CLINE_BIN),
             "--yolo",
             "--json",
-            "--thinking",
-            "none",
             "--compaction",
             "off",
             "--retries",

@@ -7,7 +7,7 @@ English is canonical if translations differ. [README](../../README.md)
 Save the Python example below as `example.py`. Start the bridge separately; load extra packages in a consumer-only environment. These examples use the compatibility alias `codex`: confirm it appears in `/v1/models`, or change `selected_model` to `default` to match the discovery quickstart. Static mode uses `codex`.
 
 ```bash
-uv run --isolated --no-project --with openai==1.109.1 python example.py
+uv run --isolated --no-project --with openai==3.51.0 python example.py
 ```
 
 ```python

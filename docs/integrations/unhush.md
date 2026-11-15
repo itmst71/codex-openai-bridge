@@ -6,6 +6,16 @@ English is canonical if translations differ. [README](../../README.md)
 
 ## Evidence and scope
 
+**Latest stable source client: Live verified (scoped), 3.3.4**, checked 2026-11-15. The fresh,
+hash-locked source completed 13 consumer contracts, including disabled warm-up (`skipped`, no
+model POST), plus three real-Codex formatter calls. See the
+[latest-stable evidence](latest-stable-evidence.json).
+This does **not** transfer the older packaged trial to 3.3.4: its RecordingBar fallback/length guard,
+native 90-second timeout, UI persistence, app restart and desktop output were not rerun. The latest
+AppImage was hash-verified and extracted, not executed. The fixture forbids both Start Command APIs.
+
+### Historical packaged baseline — 3.1.0
+
 **Operationally verified (scoped, maintainer-executed).** Source-locked contracts and an isolated
 Linux AppImage **3.1.0** packaged-renderer trial now supplement the earlier user-reported evidence.
 The live trial used `default` → `gpt-6.1-sol` through a strict isolated bridge and real Codex.
@@ -95,7 +105,7 @@ Only send text you intend to disclose to that service. The bridge's personal, si
 4. Do not interpret fallback to the raw transcript as successful formatting. Diagnose formatting
    separately from microphone capture, STT, clipboard output, and desktop typing.
 
-## Bounded maintainer trial
+## Historical bounded maintainer trial — 3.1.0
 
 | Check | Evidence |
 | --- | --- |
@@ -123,6 +133,7 @@ snapshot to keep the live fixture's CLI home read-only; dynamic refresh was not 
 
 From this checkout, use Node 20 or later and an owned scratch directory in `TMPDIR`. The revision
 and four source hashes are pinned in `tests/consumer_contract/unhush_env/source-lock.json`.
+The current pin is 3.3.4; this runs 13 consumer cases, not the historical 3.1.0 packaged acceptance.
 The preparation step rejects a modified cache instead of replacing it. No live credentials,
 installed Unhush profile or microphone are needed:
 

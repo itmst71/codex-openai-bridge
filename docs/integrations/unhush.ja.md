@@ -6,6 +6,15 @@
 
 ## 根拠と対象範囲
 
+**最新安定版のsource client: Live verified（範囲限定）、3.3.4**。確認日は2026-11-15です。
+新しい隔離prefixでhash固定sourceのconsumer contractを13件実行し、warm-up Offの`skipped`状態・model POSTなしも確認しました。
+実Codexのformatter呼出しは3回成功しています。[最新安定版の証跡](latest-stable-evidence.json)を参照してください。
+旧実package試験を3.3.4へ移転するものではありません。新版のRecordingBar fallback・length guard、実90秒timeout、
+UI永続化・app再起動・desktop出力は再検証していません。最新AppImageはhash確認・展開のみで、起動していません。
+fixtureでは両方のStart Command APIを禁止しています。
+
+### 過去の実package baseline — 3.1.0
+
 **Operationally verified（範囲限定・maintainer-executed）**。従来のuser-reported evidenceに加え、
 sourceを固定したcontractと、隔離したLinux AppImage **3.1.0**のpackaged renderer試験を実施しました。
 liveではstrictな隔離bridgeと実Codexを通し、`default` → `gpt-6.1-sol`を使いました。
@@ -91,7 +100,7 @@ bridgeの個人・単一ユーザーの範囲と[サービス利用条件](../se
 4. raw transcriptへのfallbackを整形成功と誤認しないでください。Formattingを、microphone capture・STT・
    clipboard出力・desktop typingと分けて切り分けます。
 
-## 範囲限定のmaintainer試験
+## 過去の範囲限定maintainer試験 — 3.1.0
 
 | 確認 | 証拠 |
 | --- | --- |
@@ -116,6 +125,7 @@ model discoveryには公式CLI preflightから得た公開snapshotを使いま�
 
 checkoutからNode 20以降と、`TMPDIR`に指定した所有scratch directoryを使います。revisionと4 source hashは
 `tests/consumer_contract/unhush_env/source-lock.json`で固定し、改変cacheは置換せず拒否します。
+現在のpinは3.3.4で、consumer 13件を実行します。旧3.1.0の実package受入試験とは別です。
 実credential、インストール済みUnhushのprofile、microphoneは不要です。
 
 ```bash

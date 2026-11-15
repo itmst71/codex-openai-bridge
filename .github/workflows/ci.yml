@@ -37,29 +37,33 @@ jobs:
       - name: Test
         run: uv run pytest -q
 
-      - name: Contract test with OpenAI SDK 3.1.0
+      - name: Contract test with OpenAI SDK 3.51.0
         run: >-
           uv run --isolated --no-dev
-          --with openai==3.1.0
+          --with openai==3.51.0
           --with pytest==8.4.2
           --with pytest-asyncio==1.2.0
-          pytest -q tests/contract
+          pytest -q tests/contract tests/test_cache_write_usage.py
 
-      - name: Consumer contract with LangChain 1.5.1
+      - name: Consumer contract with LangChain OpenAI 1.8.0
         run: >-
           uv run --isolated --no-dev
-          --with langchain-openai==1.5.1
-          --with langchain-core==1.5.6
-          --with openai==3.2.0
+          --with langchain-openai==1.8.0
+          --with langchain-core==1.8.0
+          --with langchain==1.5.0
+          --with langgraph==1.2.22
+          --with langchain-ollama==1.1.0
+          --with langgraph-checkpoint-sqlite==3.1.3
+          --with 'openai[aiohttp]==3.51.0'
           --with pytest==8.4.2
           --with pytest-asyncio==1.2.0
           pytest -q tests/consumer_contract/test_langchain.py
 
-      - name: Consumer contract with OpenAI Agents SDK 0.21.1
+      - name: Consumer contract with OpenAI Agents SDK 0.24.0
         run: >-
           uv run --isolated --no-dev
-          --with openai-agents==0.21.1
-          --with openai==3.2.0
+          --with openai-agents==0.24.0
+          --with openai==3.51.0
           --with pytest==8.4.2
           --with pytest-asyncio==1.2.0
           pytest -q tests/consumer_contract/test_openai_agents.py
@@ -70,7 +74,7 @@ jobs:
           --with 'autogen-ext[openai]==0.7.5'
           --with autogen-core==0.7.5
           --with autogen-agentchat==0.7.5
-          --with openai==3.2.0
+          --with openai==3.51.0
           --with pytest==8.4.2
           --with pytest-asyncio==1.2.0
           pytest -q tests/consumer_contract/test_autogen.py
@@ -89,7 +93,7 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install pinned Unhush 3.1.0 formatting consumer
+      - name: Install pinned Unhush 3.3.4 formatting consumer
         run: |
           install -d "$RUNNER_TEMP/unhush-client"
           cp tests/consumer_contract/unhush_env/package.json \
@@ -100,7 +104,7 @@ jobs:
           node tests/consumer_contract/unhush_env/prepare.mjs \
             "$RUNNER_TEMP/unhush-client"
 
-      - name: Consumer contract with Unhush 3.1.0
+      - name: Consumer contract with Unhush 3.3.4
         env:
           UNHUSH_CONTRACT_PREFIX: ${{ runner.temp }}/unhush-client
         run: uv run pytest -q tests/consumer_contract/test_unhush.py
@@ -114,7 +118,7 @@ jobs:
           npm ci --prefix "$RUNNER_TEMP/cline-cli" \
             --ignore-scripts --no-audit --no-fund
 
-      - name: Consumer contract with Cline CLI 3.0.55
+      - name: Consumer contract with Cline CLI 3.0.74
         env:
           CLINE_CONTRACT_PREFIX: ${{ runner.temp }}/cline-cli
         run: uv run pytest -q tests/consumer_contract/test_cline_cli.py

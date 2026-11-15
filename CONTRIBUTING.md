@@ -104,9 +104,9 @@ git diff --check
 ```
 
 These are the **baseline local gates**, not the complete GitHub CI matrix. GitHub CI additionally
-runs the version-isolated **Contract test with OpenAI SDK 3.1.0** and consumer contracts for the
+runs the version-isolated **Contract test with OpenAI SDK 3.51.0** and consumer contracts for the
 versions pinned in `.github/workflows/ci.yml`, including the **Consumer contract with LangChain
-1.5.1**, OpenAI Agents SDK, AutoGen, Aider, Cline CLI, and Continue core. The workflow file is the
+OpenAI 1.8.0**, OpenAI Agents SDK, AutoGen, Aider, Unhush, Cline CLI, and Continue core. The workflow file is the
 source of truth for that matrix; the pull request must pass it after submission. Contributors should
 run any isolated lane affected by their change and state exactly which lanes they did not run.
 

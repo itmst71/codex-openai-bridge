@@ -395,8 +395,8 @@ def test_contribution_acceptance_policy_and_forms_are_explicit() -> None:
         "Small documentation-only exceptions may omit the approved issue",
         "baseline local gates",
         "GitHub CI additionally runs",
-        "Contract test with OpenAI SDK 3.1.0",
-        "Consumer contract with LangChain 1.5.1",
+        "Contract test with OpenAI SDK 3.51.0",
+        "Consumer contract with LangChain OpenAI 1.8.0",
         "Issue and pull request descriptions may be written in English or Japanese",
     ):
         assert required in normalized_english
@@ -420,8 +420,8 @@ def test_contribution_acceptance_policy_and_forms_are_explicit() -> None:
         "小さなdocumentation-only例外では承認済みissueを省略できます",
         "baseline local gate",
         "GitHub CIでは追加で",
-        "OpenAI SDK 3.1.0 contract",
-        "LangChain 1.5.1 consumer contract",
+        "OpenAI SDK 3.51.0 contract",
+        "LangChain OpenAI 1.8.0 consumer contract",
         "issueとPRのdescriptionは英語または日本語",
     ):
         assert required in normalized_japanese

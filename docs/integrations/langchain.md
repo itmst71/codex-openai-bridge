@@ -4,10 +4,14 @@
 
 English is canonical if translations differ. [README](../../README.md)
 
+The [latest-stable matrix](../integrations.md) separates the 1.8.0 live/contract slice from the
+historical 1.6.0 operational campaign. Installing newer LangGraph/RAG/checkpoint dependencies does
+not transfer the older operational evidence to them.
+
 Save the Python example below as `example.py`. Start the bridge separately; load extra packages in a consumer-only environment. These examples use the compatibility alias `codex`: confirm it appears in `/v1/models`, or change the model to `default` to match the discovery quickstart. Static mode uses `codex`.
 
 ```bash
-uv run --isolated --no-project --with langchain-openai==1.6.0 --with langchain-core==1.6.0 --with 'openai[aiohttp]==3.3.1' python example.py
+uv run --isolated --no-project --with langchain-openai==1.8.0 --with langchain-core==1.8.0 --with 'openai[aiohttp]==3.51.0' python example.py
 ```
 
 ```python

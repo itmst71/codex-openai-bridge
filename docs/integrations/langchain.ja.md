@@ -4,10 +4,13 @@
 
 英語版を正本（canonical）とします。 [README](../../README.ja.md)
 
+[最新安定版の検証表](../integrations.ja.md)では、1.8.0のlive/contract試験と旧1.6.0の実運用試験を分けています。
+新しいLangGraph/RAG/checkpoint依存をinstallしただけでは、旧版の実運用実績を移転しません。
+
 以下のPython例を`example.py`として保存します。bridgeは別terminalで起動し、追加packageはconsumer用の隔離環境で読み込みます。例は互換alias `codex`を使います。`/v1/models`に掲載されていることを確認し、discoveryのクイックスタートと同じ設定にするならmodelを`default`へ変更してください。static modeでは`codex`を使います。
 
 ```bash
-uv run --isolated --no-project --with langchain-openai==1.6.0 --with langchain-core==1.6.0 --with 'openai[aiohttp]==3.3.1' python example.py
+uv run --isolated --no-project --with langchain-openai==1.8.0 --with langchain-core==1.8.0 --with 'openai[aiohttp]==3.51.0' python example.py
 ```
 
 ```python

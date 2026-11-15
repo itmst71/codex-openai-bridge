@@ -5,6 +5,6 @@
   "description": "Exact optional Cline CLI consumer contract environment",
   "license": "MIT",
   "dependencies": {
-    "@cline/cli-linux-x64": "3.0.55"
+    "@cline/cli-linux-x64": "3.0.74"
   }
 }

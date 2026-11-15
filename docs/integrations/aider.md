@@ -4,6 +4,10 @@
 
 English is canonical if translations differ. [README](../../README.md)
 
+`aider-chat` 0.86.2 is still the latest stable release at the 2026-11-15 check. Its published tuple
+pins LiteLLM 1.81.10 and OpenAI 2.20.0; these are not claims that every dependency is independently
+latest. The fresh two-case contract uses those pins, not a forced upgrade to standalone SDK 3.51.0.
+
 Aider uses an OpenAI-compatible Chat Completions endpoint. Register the unknown public alias with a
 non-secret model settings file outside the target repository, for example at
 `$HOME/.config/codex-openai-bridge/aider-model-settings.yml`, so Aider does not send an unsupported

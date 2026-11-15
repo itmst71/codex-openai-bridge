@@ -111,7 +111,8 @@ decrypting their contents.
 
 Validated reasoning summaries are exposed only when the client explicitly requests
 `reasoning.summary`; an unsolicited nonempty upstream summary is rejected. Confirmed assistant
-`phase` is retained as a typed SDK 3.1.0 field and through `model_extra` in SDK 1.109.1.
+`phase` is retained as a typed SDK 3.51.0 field (also verified historically in 3.1.0) and through
+`model_extra` in SDK 1.109.1.
 
 Custom-tool streaming normalizes the backend's exact item/input-delta lifecycle into SDK-shaped
 events, strips provider obfuscation metadata, and accepts either an omitted terminal output or a
@@ -131,5 +132,6 @@ publishing them or treating them as response events. They still consume the exis
 byte budgets and cannot replace a completed response or extend the overall request deadline.
 
 Offline contract tests run against the locked OpenAI Python SDK 1.109.1 and separately against
-OpenAI Python SDK 3.1.0. Native compaction has a typed SDK contract only in 3.1.0; the common
-Responses request, function/custom tool, non-stream, and stream subset is tested on both.
+OpenAI Python SDK 3.51.0. Native compaction has a typed contract in the 3.51.0 lane, not the legacy
+1.109.1 lane; the common Responses request, function/custom tool, non-stream and stream subset is
+tested on both. The earlier 3.1.0 result is a historical baseline, not the current CI pin.

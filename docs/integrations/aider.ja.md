@@ -4,6 +4,9 @@
 
 英語版を正本（canonical）とします。 [README](../../README.ja.md)
 
+2026-11-15の確認でも`aider-chat`0.86.2が最新stableです。公開tupleはLiteLLM1.81.10とOpenAI2.20.0を固定しており、
+各依存も単体で最新版だという意味ではありません。再実行した2件のcontractもこのpinを使い、SDK3.51.0を強制しません。
+
 Aider は OpenAI-compatible Chat Completions endpoint を使用します。未知の public alias は、target repository の外に置く non-secret model settings file に登録してください。たとえば `$HOME/.config/codex-openai-bridge/aider-model-settings.yml` を使用すると、Aider が非対応の sampling control を送信しなくなります。
 
 ```yaml

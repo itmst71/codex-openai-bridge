@@ -97,9 +97,9 @@ git diff --check
 ```
 
 これらは**baseline local gate**であり、GitHub CI matrix全体ではありません。GitHub CIでは追加で、
-version-isolatedな**OpenAI SDK 3.1.0 contract**と、`.github/workflows/ci.yml`で固定したconsumer
-contractを実行します。これには**LangChain 1.5.1 consumer contract**、OpenAI Agents SDK、AutoGen、
-Aider、Cline CLI、Continue coreが含まれます。Matrixの正本はworkflow fileです。変更の影響を受ける
+version-isolatedな**OpenAI SDK 3.51.0 contract**と、`.github/workflows/ci.yml`で固定したconsumer
+contractを実行します。これには**LangChain OpenAI 1.8.0 consumer contract**、OpenAI Agents SDK、AutoGen、
+Aider、Unhush、Cline CLI、Continue coreが含まれます。Matrixの正本はworkflow fileです。変更の影響を受ける
 isolated laneを実行し、未実行laneを正確に記載してください。提出後はCI matrix全体へのpassが必要です。
 
 Live testはoptionalかつcredentialを使います。READMEのopt-in手順に従い、proofへcredential valueを

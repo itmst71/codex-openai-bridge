@@ -1,11 +1,11 @@
 {
   "repository": "propriaworks/unhush",
-  "revision": "139154996aa4002165526a5f4fcb8c282573d8c4",
-  "version": "3.1.0",
+  "revision": "657352ea22c0738fe1c3a26005c2365032d02746",
+  "version": "3.3.4",
   "files": {
-    "package.json": "10b023f332b00b99c34c0df3508221190a7d57cdeb43d592502246c8d378a441",
-    "src/audio/llmApi.ts": "e6c01bbf8d5ce42108c363fd40ae762e530cbf78165f63ecffc86ad319375ed6",
-    "src/audio/customModelService.ts": "7ab0aed515d80b737874da673ca318a9f6b739a1590a8a095ca8a295ce75e311",
-    "src/audio/transcriptionApi.ts": "794071c8ea0d3adbed50173a1f3e1dbbc71448e75ae1eda663aecfdfaa8583f5"
+    "package.json": "21d819b8b357d36ea5cbee9f3ff20e7399bdf0e65d7560a5bf0f0e5892c378ad",
+    "src/audio/llmApi.ts": "54dd190820b6a0f97ae4558e25b3126b0808281829396f39b5ad6166b7c08a5d",
+    "src/audio/customModelService.ts": "c91c10c8c3c4eb497fc8bbb48031debd2832abd2b2a62c308bb972d26df65b31",
+    "src/audio/transcriptionApi.ts": "9260346cf085a381a8a9e4cb8cf1edaf59cca8af3959f117c2a62d41e0c5a128"
   }
 }

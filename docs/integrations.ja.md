@@ -34,6 +34,38 @@ flowchart LR
     contract --> live --> operational --> scoped
 ```
 
+## 最新安定版 — 2026-11-15確認
+
+公式に公開されたstable releaseを確認日で固定した結果であり、将来の最新版を自動保証するものではありません。
+prerelease/dev/yankedを除外し、componentと製品CLIを区別しました。
+[version・日時・公式source・実行証跡](integrations/latest-stable-evidence.json)に実際の依存tupleを記録しています。
+Aiderは公開packageが固定する旧依存を維持します。
+
+所有する隔離bridge（static `codex` → `gpt-6.1-sol`）と実Codexの試験は16項目・21API request、全HTTP200でした。
+試験後にprocessとlistenerの終了を確認しています。本番反映・model discovery・製品全体の耐久試験ではありません。
+今回の狭い最新版scopeと、下の旧版の実運用実績は分けて扱います。
+
+| コンシューマー / tool | 最新安定版 | 今回の根拠 | 正確な境界 / 未検証 |
+| --- | --- | --- | --- |
+| OpenAI Python SDK | 3.51.0 | **Live verified** + native typed contract | Async Chat/Responsesのbuffered/stream、structured/function/custom-tool・cache-write・compaction contract。`max_retries=0`、他API・長時間挙動は未検証 |
+| Unhush Custom Formatting | 3.3.4、source `657352ea22c0738fe1c3a26005c2365032d02746` | **Live verified、source clientのみ**。consumer13件・実整形3回 | 3.3.4の実packageのRecordingBar/停止/fallback/length/90秒/UI/再起動ではない。AppImageはhash確認・展開のみ。3.1.0の実package根拠は別記 |
+| Honcho server | 3.6.1、source `70c67624169683b9e265517aec95a51b8077cabc` | **Contract verified、native backend/codec**。6件・HTTP7件全200 | Consumer Python3.13.15 / SDK3.51.0 / Pydantic2.14.3 → 別processの実bridge Python3.12.3 / SDK1.109.1 / Pydantic2.13.4、synthetic upstream。実provider・DB/Redis/fullserviceは未検証。#1061のnull修正は包含済み。初回3.13-bridge probeと上流回帰4件は別証拠 |
+| LangChain `ChatOpenAI` | `langchain-openai`/`langchain-core` 1.8.0、SDK3.51.0 | **Live verified、範囲限定**。contract5件・live4件 | Chat/Responses text、Chat local tool往復、Responses Pydantic schema。旧RAG/LangGraph/SQLite/HITL/並列・障害試験は再実行しておらず、依存installだけでは実運用根拠にならない |
+| OpenAI Agents SDK | 0.24.0、SDK3.51.0 | **Live verified、Chat model**。contract3件・live2件 | basic Runnerとstream。local tool loopはcontractのみ。tracing無効。ResponsesModel・sessions・hosted toolsは未検証 |
+| AutoGen | ext/core/agentchat 0.7.5、SDK3.51.0 | **Live verified、direct client**。contract3件・live2件 | direct text/streamはlive、schemaと条件付きtool/reflection adapterはcontract。teams・hosted agents・memory/code executionは未検証 |
+| Aider | 0.86.2、LiteLLM1.81.10 / SDK2.20.0 | **Contract verified**、2件。現在もlatest stable | 既存1fileの制限付きstreaming `whole`編集。公開tupleへ単体最新版依存を強制しない。live/interactive/長時間利用の追加保証ではない |
+| Cline CLI Linux x64 | 3.0.74 | **Live verified**、制限付き編集。contract2件・live1件 | `--thinking none`を省略し、local-only controls・短いprompt・native guardを維持。liveは許可3種類のtoolを4回使用、HEAD不変・対象1fileのみ。他platform/roleは未検証 |
+| Continue core provider | `@continuedev/core` 1.1.0、`tsx`4.23.12 | **Contract verified**、3件。現在もlatest stable | 公開component artifactそのもの。現行`cn` CLI（`@continuedev/cli`1.5.47）とは別。Chat/Edit/tool結果のみでApply/IDE/embedding/耐久試験ではない |
+
+SDKのCI lane142件は、実SDK21件・旧Honcho request shape7件・共通usage正規化114件です。
+旧shape7件を最新Honcho backendの検証とは数えません。最新native probeは別です。
+追加consumerはtest-only依存で、bridge runtime依存へ追加しません。
+
+## 過去の検証baseline
+
+以下は当時のexact versionとscopeを保持する記録です。広いOperational評価を上の新版へ移転しません。
+必要条件も当時のsnapshotに対するものです。
+
 | コンシューマー / tool | 対応状況 | 動作確認済み version | 検証済みの範囲 | 未検証事項 / 必要条件 |
 | --- | --- | --- | --- | --- |
 | OpenAI Python SDK | **Live verified（live検証済み）** | 1.109.1 and 3.1.0 | live Chat/Responses non-stream/streamと、offline structured output、function/custom-tool、usage、compaction contract | `max_retries=0`を使用。非対応OpenAI API surfaceや長時間application挙動の検証ではない |
