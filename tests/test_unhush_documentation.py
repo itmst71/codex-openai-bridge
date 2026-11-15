@@ -1,4 +1,4 @@
-"""Publication boundaries for the user-reported Unhush formatting integration."""
+"""Publication boundaries for the scoped, maintainer-executed Unhush integration."""
 
 from __future__ import annotations
 
@@ -30,13 +30,17 @@ def test_unhush_documentation_is_scoped_attributed_and_linked() -> None:
         readme = (ROOT / f"README{suffix}").read_text()
         matrix = (ROOT / "docs" / f"integrations{suffix}").read_text()
         assert "| Unhush Custom Formatting |" in readme
-        assert "user-reported" in readme
+        row = next(line for line in readme.splitlines() if line.startswith("| Unhush"))
+        assert "user-reported" not in row
         assert f"docs/integrations/unhush{suffix}" in readme
         assert "| Unhush Custom Formatting |" in matrix
         assert f"integrations/unhush{suffix}" in matrix
         text = (ROOT / "docs/integrations" / f"unhush{suffix}").read_text()
         for required in (
-            "user-reported",
+            "maintainer-executed",
+            "source-lock.json",
+            "UNHUSH_CONTRACT_PREFIX",
+            "unhush-evidence.json",
             "3.1.0",
             "http://127.0.0.1:8646",
             "llm_provider",
@@ -57,12 +61,14 @@ def test_unhush_documentation_is_scoped_attributed_and_linked() -> None:
             assert "without `/v1`" in text
             assert "transcript text leaves the host" in text
             assert "not a speech-to-text backend" in text
-            assert "not independently reverified" in text
+            assert "not a full microphone-to-desktop test" in text
+            assert "recorder-completion fixture" in text
         else:
             assert "`/v1`を付けない" in text
             assert "テキストはホストの外へ送信" in text
             assert "音声認識バックエンドではありません" in text
-            assert "独立した実運用再検証ではありません" in text
+            assert "マイクからdesktop出力までの全体検証ではありません" in text
+            assert "録音完了を置き換えるfixture" in text
 
 
 @pytest.mark.asyncio

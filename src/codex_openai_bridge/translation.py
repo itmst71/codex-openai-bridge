@@ -428,6 +428,7 @@ def _normalize_upstream_usage(value: object, *, require_details: bool = False) -
             not in (
                 {"cached_tokens"},
                 {"cached_tokens", "cache_write_tokens"},
+                {"cached_tokens", "cache_write_tokens", "cache_write_tokens_details"},
             )
             or type(output_details) is not dict
             or set(output_details) != {"reasoning_tokens"}
@@ -436,8 +437,22 @@ def _normalize_upstream_usage(value: object, *, require_details: bool = False) -
         _nonnegative_int(input_details["cached_tokens"])
         if "cache_write_tokens" in input_details:
             _nonnegative_int(input_details["cache_write_tokens"])
+        if "cache_write_tokens_details" in input_details:
+            cache_details = input_details["cache_write_tokens_details"]
+            if type(cache_details) is not dict or set(cache_details) != {
+                "ttl_30m_tokens",
+                "ttl_12h_tokens",
+            }:
+                raise _invalid_stream()
+            for count in cache_details.values():
+                _nonnegative_int(count)
         _nonnegative_int(output_details["reasoning_tokens"])
-        normalized["input_tokens_details"] = dict(input_details)
+        # The TTL breakdown is private provider accounting, not public usage authority.
+        normalized["input_tokens_details"] = {
+            name: input_details[name]
+            for name in ("cached_tokens", "cache_write_tokens")
+            if name in input_details
+        }
         normalized["output_tokens_details"] = dict(output_details)
     return normalized
 

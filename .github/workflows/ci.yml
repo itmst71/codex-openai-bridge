@@ -89,6 +89,22 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install pinned Unhush 3.1.0 formatting consumer
+        run: |
+          install -d "$RUNNER_TEMP/unhush-client"
+          cp tests/consumer_contract/unhush_env/package.json \
+             tests/consumer_contract/unhush_env/package-lock.json \
+             "$RUNNER_TEMP/unhush-client/"
+          npm ci --prefix "$RUNNER_TEMP/unhush-client" \
+            --ignore-scripts --no-audit --no-fund
+          node tests/consumer_contract/unhush_env/prepare.mjs \
+            "$RUNNER_TEMP/unhush-client"
+
+      - name: Consumer contract with Unhush 3.1.0
+        env:
+          UNHUSH_CONTRACT_PREFIX: ${{ runner.temp }}/unhush-client
+        run: uv run pytest -q tests/consumer_contract/test_unhush.py
+
       - name: Install locked Cline CLI consumer
         run: |
           install -d "$RUNNER_TEMP/cline-cli"

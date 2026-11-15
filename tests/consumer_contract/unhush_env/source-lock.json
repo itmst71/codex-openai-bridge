@@ -1,0 +1,11 @@
+{
+  "repository": "propriaworks/unhush",
+  "revision": "139154996aa4002165526a5f4fcb8c282573d8c4",
+  "version": "3.1.0",
+  "files": {
+    "package.json": "10b023f332b00b99c34c0df3508221190a7d57cdeb43d592502246c8d378a441",
+    "src/audio/llmApi.ts": "e6c01bbf8d5ce42108c363fd40ae762e530cbf78165f63ecffc86ad319375ed6",
+    "src/audio/customModelService.ts": "7ab0aed515d80b737874da673ca318a9f6b739a1590a8a095ca8a295ce75e311",
+    "src/audio/transcriptionApi.ts": "794071c8ea0d3adbed50173a1f3e1dbbc71448e75ae1eda663aecfdfaa8583f5"
+  }
+}

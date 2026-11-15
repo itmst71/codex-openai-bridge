@@ -1,0 +1,11 @@
+{
+  "name": "codex-openai-bridge-unhush-contract",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pinned optional compiler for the unmodified Unhush formatting client",
+  "license": "MIT",
+  "dependencies": {
+    "esbuild": "0.28.1"
+  }
+}

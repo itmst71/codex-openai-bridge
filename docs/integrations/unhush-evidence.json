@@ -1,0 +1,206 @@
+{
+  "scope": "Unhush Custom Formatting; bounded maintainer-executed trial, not full microphone/STT/desktop acceptance",
+  "consumer": {
+    "version": "3.1.0",
+    "repository": "propriaworks/unhush",
+    "revision": "139154996aa4002165526a5f4fcb8c282573d8c4",
+    "source_sha256": {
+      "package.json": "10b023f332b00b99c34c0df3508221190a7d57cdeb43d592502246c8d378a441",
+      "src/audio/llmApi.ts": "e6c01bbf8d5ce42108c363fd40ae762e530cbf78165f63ecffc86ad319375ed6",
+      "src/audio/customModelService.ts": "7ab0aed515d80b737874da673ca318a9f6b739a1590a8a095ca8a295ce75e311",
+      "src/audio/transcriptionApi.ts": "794071c8ea0d3adbed50173a1f3e1dbbc71448e75ae1eda663aecfdfaa8583f5"
+    },
+    "app_asar_sha256": "6046952d08f481f5107f1d8857512a9117324d95ade35892f1d092ffe5b6753d"
+  },
+  "bridge": {
+    "base_revision": "67908ab8b2d1483bb581f8bf21c1e24b1e02cffc",
+    "runtime_file_sha256": {
+      "src/codex_openai_bridge/translation.py": "0ceab6f8375e560577d9288a10f26f5084d7e04608683268a1996f7f8057a57e"
+    },
+    "provider_extension": "Observed cache_write_tokens_details with exactly ttl_30m_tokens and ttl_12h_tokens; nonnegative integer validation, private stripping; not a published official nested schema"
+  },
+  "local_full_tests": {
+    "passed": 2453,
+    "skipped": 15
+  },
+  "sdk_3_1_0_contract_and_usage_tests": {
+    "passed": 142,
+    "skipped": 0
+  },
+  "consumer_contract_and_source_integrity_tests": {
+    "passed": 13,
+    "skipped": 0
+  },
+  "live_model": {
+    "public_alias": "default",
+    "upstream_model": "gpt-6.1-sol",
+    "catalog_scope": "Official CLI public preflight snapshot injected into isolated bridge; no dynamic refresh claim"
+  },
+  "packaged_trial": {
+    "initial_realm": [
+      {
+        "case": "cold_warmup_raw_1",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 3,
+        "warmup_streak": 1
+      },
+      {
+        "case": "cold_warmup_raw_2",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 5,
+        "warmup_streak": 2
+      },
+      {
+        "case": "real_codex_warmup",
+        "ok": true,
+        "elapsed_ms": 2290
+      },
+      {
+        "case": "literal_format_repeat_1",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 5126,
+        "warmup_streak": 0
+      },
+      {
+        "case": "literal_format_repeat_2",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 2436,
+        "warmup_streak": 0
+      },
+      {
+        "case": "literal_format_repeat_3",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 1995,
+        "warmup_streak": 0
+      },
+      {
+        "case": "fault_401_raw",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 5,
+        "warmup_streak": 0
+      },
+      {
+        "case": "fault_429_raw",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 4,
+        "warmup_streak": 0
+      },
+      {
+        "case": "fault_503_raw",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 6,
+        "warmup_streak": 0
+      },
+      {
+        "case": "fault_empty_raw",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 5,
+        "warmup_streak": 0
+      },
+      {
+        "case": "fault_malformed_raw",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 8,
+        "warmup_streak": 0
+      },
+      {
+        "case": "length_boundary_accepted",
+        "ok": true,
+        "output_length": 23,
+        "elapsed_ms": 5,
+        "warmup_streak": 0
+      },
+      {
+        "case": "overlength_raw_fallback",
+        "ok": true,
+        "output_length": 3,
+        "elapsed_ms": 6,
+        "warmup_streak": 0
+      },
+      {
+        "case": "literal_format_after_faults",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 2110,
+        "warmup_streak": 0
+      },
+      {
+        "case": "real_90s_timeout_raw_fallback",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 90002,
+        "warmup_streak": 0
+      },
+      {
+        "case": "literal_format_after_timeout",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 2330,
+        "warmup_streak": 0
+      }
+    ],
+    "restarted_realm": [
+      {
+        "case": "cold_warmup_raw_1",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 2,
+        "warmup_streak": 1
+      },
+      {
+        "case": "cold_warmup_raw_2",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 5,
+        "warmup_streak": 2
+      },
+      {
+        "case": "real_codex_warmup",
+        "ok": true,
+        "elapsed_ms": 2064
+      },
+      {
+        "case": "literal_format_after_app_restart",
+        "ok": true,
+        "output_length": 8,
+        "elapsed_ms": 2819,
+        "warmup_streak": 0
+      }
+    ],
+    "accepted_case_count": 20,
+    "native_timeout_ms": 90008,
+    "recording_input": "synthetic recorder-completion queue, no microphone or STT",
+    "output": "exact clipboard readback on private Xvfb; per-case sentinel for literal/fault/deadline cases",
+    "fault_origin": "local gateway injections, not real provider outages",
+    "ui_keyboard_save_and_reload": true,
+    "full_app_restart_storage": true,
+    "startup_override_scope": "Owned seed settings.json absent during persistence restart",
+    "exploratory_prompt_assertions": [
+      {
+        "outcome": "failed",
+        "cause": "extract-uppercase prompt on lowercase text yielded empty content; raw fallback verified"
+      },
+      {
+        "outcome": "failed",
+        "cause": "conversion prompt yielded XML-wrapped output beyond length guard; raw fallback verified"
+      }
+    ],
+    "qualification": "Repeat/recovery assertions use a separate fixed-literal scenario, not an arbitrary-prompt success-rate claim"
+  },
+  "cleanup": {
+    "all_owned_listeners_closed": true,
+    "both_recorded_app_display_owner_pid_sets_gone": true,
+    "active_extracted_app_processes": 0,
+    "existing_user_app_and_settings_changed": false
+  }
+}

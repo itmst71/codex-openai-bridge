@@ -6,16 +6,18 @@
 
 ## 根拠と対象範囲
 
-**Operationally verified（範囲限定・user-reported）**。利用者から、UnhushのCustom Formattingと
-このbridgeを組み合わせた実利用で正常に動作しているとの報告があります。報告環境で確認したpackageは
-Linux AppImage **3.1.0**で、版数はpackage内のapplication metadataから読み取りました。
-これは利用者の実利用報告であり、独立した実運用再検証ではありません。
-すべての3.1.0 build、他のplatform/version、長時間利用、再起動・障害復旧、keyboard injection、
-あらゆるprompt/modelの組み合わせを保証しません。
+**Operationally verified（範囲限定・maintainer-executed）**。従来のuser-reported evidenceに加え、
+sourceを固定したcontractと、隔離したLinux AppImage **3.1.0**のpackaged renderer試験を実施しました。
+liveではstrictな隔離bridgeと実Codexを通し、`default` → `gpt-6.1-sol`を使いました。
+source revision、package hash、scenarioと対象外は[凍結した証跡要約](unhush-evidence.json)に記録しています。
 
-sourceで以下の整形request形状を確認しています。決定的なtestではsynthetic credentialsとfake upstreamを
-使ってstrict bridgeを実行しますが、追加のlive Codex検証やmicrophone/desktop検証ではありません。
-Unhushをbridgeのruntime依存やCI package依存に追加するものではありません。
+これは**マイクからdesktop出力までの全体検証ではありません**。**録音完了を置き換えるfixture**で合成transcriptを
+実packageの停止・整形codeに渡し、そのcode自体は書き換えていません。出力のreadbackも独立Xvfbのclipboardだけです。
+既存app profile、通常desktop入力、microphoneは使っていません。他build/platform/model、任意promptの精度、
+通常desktopのclipboard/typing/hotkey、無関係なUI経路、長時間運用を保証しません。
+
+Unhushはbridgeのruntime依存ではありません。CIではoptionalなlocked compilerを使って固定consumer sourceを別途準備し、
+決定的contractをsynthetic credentialsとfake upstreamで実行します。
 
 ## 音声認識ではなく整形を設定
 
@@ -41,6 +43,10 @@ UIでFormattingだけを変更してください。保存keyの列は参照用�
 他の設定と既存の音声認識providerを維持してください。
 SettingsとChromium local storageにはclient tokenが含まれることがあります。非公開で保管し、
 内容をissueやscreenshotへ添付しないでください。
+
+UIの変更先はChromium local storageです。起動用`settings.json`がある場合は、その値が起動時に上書きされることがあり、
+UIの保存先ではありません。再起動試験では所有するprofileを再利用し、合成seed overrideだけを取り除きました。
+fixtureを再現するために自分の設定fileを削除せず、意図した起動時overrideの有無を考慮してください。
 
 ## リクエスト契約
 
@@ -85,5 +91,42 @@ bridgeの個人・単一ユーザーの範囲と[サービス利用条件](../se
 4. raw transcriptへのfallbackを整形成功と誤認しないでください。Formattingを、microphone capture・STT・
    clipboard出力・desktop typingと分けて切り分けます。
 
-実運用labelの根拠は利用者の実利用報告です。Unhush UI全体の反復workflowや障害復旧試験を、
-独立して実施済みと主張するguideではありません。
+## 範囲限定のmaintainer試験
+
+| 確認 | 証拠 |
+| --- | --- |
+| Warm-up・反復 | 実際のuser-only `max_tokens: 1` warm-upと、実Codex経由の固定literal整形3回 |
+| 障害処理 | local gatewayで401・429・503・空content・不正JSONを注入。実停止経路がraw textへ戻り、同じrendererで実整形へ復帰 |
+| 出力長 | 境界値は受入、超過時は出力を破棄してraw textを使用 |
+| Deadline | 時計を短縮せずnative 90秒abortを90,008 msで観測。raw fallback後の実整形requestも成功 |
+| 永続化 | 実Formatting UIをkeyboardで変更・保存し、page reloadと所有app全体の再起動でprompt/provider/model/tokenをreadback。その後の実warm-upと整形も成功 |
+
+障害はlocal注入であり、実provider障害の観測ではありません。recorder境界はfixtureのままで、有限・逐次試験であり、
+長期運用や並列性の試験でもありません。初期のprompt別assertionでは、抽出指示が空textを返したケースと、変換指示が
+XML付きtextを返して出力長guardに拒否されたケースがありました。両方のraw fallbackを証跡に残し、反復・復帰scenarioは
+別の明示的な固定literal promptで実行しました。失敗requestを黙って再試行して成功扱いにせず、一般的なprompt品質も保証しません。
+
+この試験ではbridge共通の502も検出しました。現在のCodexがprivateな
+`usage.input_tokens_details.cache_write_tokens_details` objectを返すためで、この変更では実観測した2-counterの
+閉じたshapeだけを検証し、公開出力前に除去します。未知fieldは引き続きfail-closedです。このnested拡張はproviderの
+実観測であり、公開された公式schemaや新しい公開usage機能ではありません。live fixtureのCLI homeをread-onlyにするため、
+model discoveryには公式CLI preflightから得た公開snapshotを使いました。動的refreshの再検証ではありません。
+
+## optional consumer contractの再現
+
+checkoutからNode 20以降と、`TMPDIR`に指定した所有scratch directoryを使います。revisionと4 source hashは
+`tests/consumer_contract/unhush_env/source-lock.json`で固定し、改変cacheは置換せず拒否します。
+実credential、インストール済みUnhushのprofile、microphoneは不要です。
+
+```bash
+prefix="$(mktemp -d "${TMPDIR:?Set TMPDIR to an owned scratch directory}/unhush-contract.XXXXXX")"
+cp tests/consumer_contract/unhush_env/package.json \
+   tests/consumer_contract/unhush_env/package-lock.json "$prefix/"
+npm ci --prefix "$prefix" --ignore-scripts --no-audit --no-fund
+node tests/consumer_contract/unhush_env/prepare.mjs "$prefix"
+UNHUSH_CONTRACT_PREFIX="$prefix" uv run pytest -q tests/consumer_contract/test_unhush.py
+```
+
+これは決定的consumer contractの再現であり、実packageのlive試験ではありません。後者には同じpackage、別user-data
+directoryとdisplay、合成recorder completion、隔離bridge、制御したfault gatewayが必要です。既存profileへprobeを接続しないでください。
+固定testsとcompilerはoptional test toolingであり、production依存ではありません。
