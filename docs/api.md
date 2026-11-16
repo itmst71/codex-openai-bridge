@@ -103,6 +103,13 @@ reasoning may begin the next function round only after all parallel outputs are 
 IDs, repeated outputs, partial parallel rounds, and reasoning inserted while calls remain pending
 are rejected.
 
+Function-call arguments may arrive only in `response.function_call_arguments.done` when no
+nonempty argument delta has been received for that declared item. The bridge validates the final
+JSON object, applies the existing byte limit, and emits one argument delta for Chat streaming.
+Once any argument bytes have arrived, the done snapshot must still match them exactly; identity,
+duplicate/late events, item completion, and terminal-snapshot checks remain unchanged. This does
+not disable parallel tools or allow a partial argument string to be replaced or extended at done.
+
 Developer messages use the explicit content-part form. Assistant replay items accept the
 live-proven `completed`, `in_progress`, and `incomplete` status values and optional
 `commentary`/`final_answer` phase. Encrypted reasoning and compaction blobs are opaque replay

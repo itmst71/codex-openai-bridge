@@ -91,6 +91,12 @@ flowchart LR
 すべてのparallel outputが完了した後に限ります。重複ID、繰り返しoutput、未完了のparallel round、
 pending callが残る間のreasoning挿入は拒否します。
 
+宣言済みfunction callの非空引数deltaをまだ受信していない場合は、
+`response.function_call_arguments.done`だけに最終引数が含まれる形式も受理します。
+最終JSON objectと既存byte上限を検証し、Chat streamには引数deltaを1回だけ生成します。
+引数byteを一度でも受信した後はdone snapshotとの完全一致が必要です。identity・重複や遅延event・
+item完了・terminal snapshotの検証は維持し、並列toolを無効化したり、部分引数をdoneで置換・補完したりしません。
+
 Developer messages は明示的な content-part form を使用します。Assistant replay items では、実環境で検証済みの `completed`、`in_progress`、`incomplete` status values と、任意の `commentary`/`final_answer` phase を受理します。Encrypted reasoning と compaction blobs は opaque replay authority として扱われます。ブリッジは内容をログに記録したり復号したりせず、bounds、ordering、identity、duplication を検証します。
 
 検証済みの reasoning summaries は、クライアントが `reasoning.summary` を明示的に要求した場合に限って公開されます。要求されていない nonempty upstream summary は拒否されます。確認済みの assistant `phase` はSDK 3.51.0でtyped fieldとして（旧3.1.0でも検証済み）、SDK 1.109.1では`model_extra`を介して保持されます。

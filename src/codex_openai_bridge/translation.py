@@ -1214,12 +1214,26 @@ class _ResponsesStreamTranslator:
             state is None
             or self._validate_output_index(event) != state.output_index
             or state.arguments_done
-            or event["arguments"] != state.arguments
         ):
             raise _invalid_stream()
+        frames: tuple[bytes, ...] = ()
+        if event["arguments"] != state.arguments:
+            # Parallel calls can arrive with no argument deltas. Accept only that
+            # empty-prefix case; never replace or extend already-streamed bytes.
+            if state.arguments:
+                raise _invalid_stream()
+            arguments = _validate_arguments_object(event["arguments"])
+            frames = self._on_arguments_delta(
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": item_id,
+                    "output_index": state.output_index,
+                    "delta": arguments,
+                }
+            )
         _validate_arguments_object(state.arguments)
         state.arguments_done = True
-        return ()
+        return frames
 
     def _matching_custom_event(self, event: dict[str, Any]) -> _CustomStreamItem:
         state = self.custom_call
